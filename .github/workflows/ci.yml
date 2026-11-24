@@ -1,0 +1,43 @@
+name: CI
+
+# Every push to master and every pull request runs the suite on Linux, macOS and Windows: a schedule runs in a
+# window and in Node on all three. A newer push to the same branch or pull request cancels the run before it.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+      - run: npm run workflows:check
+      # The package as a consumer gets it: packed, installed elsewhere, and the README's example run from it.
+      - run: npm run package:smoke
+
+  # The one check a release waits on: every job above passed.
+  ci-pass:
+    if: always()
+    needs: [suite]
+    runs-on: ubuntu-24.04
+    steps:
+      - run: test "${{ needs.suite.result }}" = "success"
