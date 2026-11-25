@@ -23,6 +23,8 @@ type Task = { readonly what: string; run(): void }
 export interface Clock {
   /** How long since the scenario began, in milliseconds: the time the last timer to fire was set for. */
   now(): number
+  /** Monotonic time since the scenario began, in milliseconds: matches `now()` on a schedule clock. */
+  monotonic(): number
   /** Runs `run` once, `ms` from now, when the schedule gets to it. Returns what cancels it. Throws `RangeError` for non-finite `ms`. */
   after(ms: number, run: () => void): () => void
   /** Resolves `ms` from now, when the schedule gets to it. Rejects with `RangeError` for non-finite `ms`, or `options.signal.reason` if aborted. */
@@ -83,6 +85,7 @@ async function once(scenario: Scenario, choose: (depth: number, among: number) =
   }
   const clock: Clock = {
     now: () => time,
+    monotonic: () => time,
     after: (ms, run) => {
       assertFinite(ms)
       const due = time + Math.max(0, ms)

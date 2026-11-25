@@ -49,7 +49,7 @@ A scenario is a function of a `Schedule` that builds what it checks and returns 
 | `work(label, value)` | Outside work in a lane of its own: a promise that resolves, with this value, when the schedule gets to it |
 | `breaks(label, error)` | The same, for work that fails |
 | `outside()` | Says something outside the schedule is under way, such as a message on a real socket. The run does not come to rest until what it returns is called |
-| `clock` | The scenario's clock: `now()`, `after(ms, run)` and `sleep(ms, { signal? })`. It moves only when the schedule runs one of its timers, in the order they are due, so no test waits on real time |
+| `clock` | The scenario's clock: `now()`, `monotonic()`, `after(ms, run)` and `sleep(ms, { signal? })`. It moves only when the schedule runs one of its timers, in the order they are due, so no test waits on real time |
 
 What is in one lane keeps its order. Between lanes the schedule chooses, and that is all it may choose.
 

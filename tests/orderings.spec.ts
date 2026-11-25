@@ -82,13 +82,15 @@ describe('a schedule', () => {
     const orderings = await everyOrder((schedule) => {
       const clock: Clock = schedule.clock
       const ran: string[] = []
+      const startMono = clock.monotonic()
+      expect(startMono).toBe(0)
       const cancel = clock.after(50, () => { ran.push('cancelled') })
-      clock.after(100, () => { ran.push(`t=${clock.now()}`) })
-      void clock.sleep(25).then(() => { ran.push(`sleep=${clock.now()}`); cancel() })
+      clock.after(100, () => { ran.push(`t=${clock.now()}:${clock.monotonic() - startMono}`) })
+      void clock.sleep(25).then(() => { ran.push(`sleep=${clock.now()}:${clock.monotonic() - startMono}`); cancel() })
       schedule.does('work', ['step', () => { ran.push('work') }])
       return () => {
         expect(ran).not.toContain('cancelled')
-        expect(ran.indexOf('sleep=25')).toBeLessThan(ran.indexOf('t=100'))
+        expect(ran.indexOf('sleep=25:25')).toBeLessThan(ran.indexOf('t=100:100'))
         expect(ran).toContain('work')
       }
     })
