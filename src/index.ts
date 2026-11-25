@@ -23,10 +23,10 @@ type Task = { readonly what: string; run(): void }
 export interface Clock {
   /** How long since the scenario began, in milliseconds: the time the last timer to fire was set for. */
   now(): number
-  /** Runs `run` once, `ms` from now, when the schedule gets to it. Returns what cancels it. */
+  /** Runs `run` once, `ms` from now, when the schedule gets to it. Returns what cancels it. Throws `RangeError` for non-finite `ms`. */
   after(ms: number, run: () => void): () => void
-  /** Resolves `ms` from now, when the schedule gets to it. */
-  sleep(ms: number): Promise<void>
+  /** Resolves `ms` from now, when the schedule gets to it. Rejects with `RangeError` for non-finite `ms`, or `options.signal.reason` if aborted. */
+  sleep(ms: number, options?: { readonly signal?: AbortSignal }): Promise<void>
 }
 
 export interface Schedule {
@@ -78,9 +78,13 @@ async function once(scenario: Scenario, choose: (depth: number, among: number) =
   let time = 0
   const timers: Array<Task & { readonly due: number }> = []
   const clockLane: Lane = { label: 'the clock' }
+  const assertFinite = (ms: number): void => {
+    if (!Number.isFinite(ms)) throw new RangeError(`A clock expects a finite wait in milliseconds, and was given ${String(ms)}`)
+  }
   const clock: Clock = {
     now: () => time,
     after: (ms, run) => {
+      assertFinite(ms)
       const due = time + Math.max(0, ms)
       const timer = { what: `the clock: ${due} ms`, due, run: () => { time = due; run() } }
       let at = timers.length
@@ -89,7 +93,22 @@ async function once(scenario: Scenario, choose: (depth: number, among: number) =
       lanes.set(clockLane, timers)
       return () => { const index = timers.indexOf(timer); if (index >= 0) timers.splice(index, 1) }
     },
-    sleep: (ms) => new Promise((resolve) => { clock.after(ms, resolve) }),
+    sleep: (ms, options) => new Promise((resolve, reject) => {
+      assertFinite(ms)
+      const signal = options?.signal
+      if (signal?.aborted) { reject(signal.reason); return }
+      let cancel: () => void
+      const onAbort = (): void => {
+        signal?.removeEventListener('abort', onAbort)
+        cancel()
+        reject(signal!.reason)
+      }
+      cancel = clock.after(ms, () => {
+        signal?.removeEventListener('abort', onAbort)
+        resolve()
+      })
+      signal?.addEventListener('abort', onAbort)
+    }),
   }
   const schedule: Schedule = {
     clock,
