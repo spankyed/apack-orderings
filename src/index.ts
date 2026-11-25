@@ -25,9 +25,15 @@ export interface Clock {
   now(): number
   /** Monotonic time since the scenario began, in milliseconds: matches `now()` on a schedule clock. */
   monotonic(): number
-  /** Runs `run` once, `ms` from now, when the schedule gets to it. Returns what cancels it. Throws `RangeError` for non-finite `ms`. */
+  /**
+   * Runs `run` once, `ms` from now, when the schedule gets to it. Returns an idempotent cancel function.
+   * Negative finite waits are treated as `0`. Throws `RangeError` for a non-finite `ms` or overflowing deadline.
+   */
   after(ms: number, run: () => void): () => void
-  /** Resolves `ms` from now, when the schedule gets to it. Rejects with `RangeError` for non-finite `ms`, or `options.signal.reason` if aborted. */
+  /**
+   * Resolves `ms` from now, when the schedule gets to it. Rejects with `RangeError` for a non-finite `ms` or
+   * overflowing deadline, or with `options.signal.reason` if aborted.
+   */
   sleep(ms: number, options?: { readonly signal?: AbortSignal }): Promise<void>
 }
 
@@ -51,44 +57,51 @@ export interface Schedule {
 }
 
 /** What a scenario is: it builds what it checks from the schedule, and returns what must hold once all is at rest. */
-export type Scenario = (schedule: Schedule) => () => void
+export type Scenario = (schedule: Schedule) => () => void | Promise<void>
 
 /** How one run went: each choice made, how many there were to choose from, and what was run, in order. */
 interface Run { choices: number[]; counts: number[]; taken: string[]; error?: unknown }
 
 /**
  * Lets every promise that can settle do so: a message is delivered on a turn of the event loop, which comes after all
- * of them. A message and not `setImmediate`, which costs fifty times as much and is paid once per thing run, and is
- * not there in a window.
+ * of them. Lazily created on the first run so importing the module allocates no handle; in Node, `port1` is reffed
+ * only while at least one run is active so an idle process can exit cleanly.
  */
-const turn = new MessageChannel()
-/** In Node an open port keeps the process alive, so it is held only while a run is waiting on it. A window has neither. */
-const hold = turn.port1 as unknown as { onmessage: (() => void) | null; ref?(): void; unref?(): void }
+let turn: InstanceType<typeof MessageChannel> | undefined
+let hold: { onmessage: (() => void) | null; ref?(): void; unref?(): void } | undefined
 const onTurns: Array<() => void> = []
 let activeRuns = 0
-hold.onmessage = () => { onTurns.shift()?.() }
-hold.unref?.()
-const settled = (): Promise<void> => new Promise((resolve) => { onTurns.push(resolve); turn.port2.postMessage(0) })
+const ensureTurn = (): void => {
+  if (!turn) {
+    turn = new MessageChannel()
+    hold = turn.port1 as unknown as { onmessage: (() => void) | null; ref?(): void; unref?(): void }
+    hold.onmessage = () => { onTurns.shift()!() }
+  }
+}
+const settled = (): Promise<void> => new Promise((resolve) => { onTurns.push(resolve); turn!.port2.postMessage(0) })
 
 /** More than this in one run is two things telling each other forever. */
 const RUNAWAY = 10_000
 
+const assertFiniteWait = (ms: number): void => {
+  if (!Number.isFinite(ms)) throw new RangeError(`A clock expects a finite wait in milliseconds, and was given ${String(ms)}`)
+}
+
 async function once(scenario: Scenario, choose: (depth: number, among: number) => number): Promise<Run> {
-  const lanes = new Map<Lane, Task[]>()
-  const into = (lane: Lane, task: Task): void => { (lanes.get(lane) ?? lanes.set(lane, []).get(lane)!).push(task) }
+  const lanes = new Map<object, Task[]>()
+  const into = (lane: object, task: Task): void => { (lanes.get(lane) ?? lanes.set(lane, []).get(lane)!).push(task) }
   // The clock's timers: a lane kept in the order they are due, and of two due at once, the one set first.
   let time = 0
   const timers: Array<Task & { readonly due: number }> = []
-  const clockLane: Lane = { label: 'the clock' }
-  const assertFinite = (ms: number): void => {
-    if (!Number.isFinite(ms)) throw new RangeError(`A clock expects a finite wait in milliseconds, and was given ${String(ms)}`)
-  }
-  const clock: Clock = {
+  const clockLane = {}
+  const sleepCleanups = new Set<() => void>()
+  const clock: Clock = Object.freeze<Clock>({
     now: () => time,
     monotonic: () => time,
     after: (ms, run) => {
-      assertFinite(ms)
+      assertFiniteWait(ms)
       const due = time + Math.max(0, ms)
+      if (!Number.isFinite(due)) throw new RangeError(`A clock wait of ${String(ms)} ms overflows the scenario clock`)
       const timer = { what: `the clock: ${due} ms`, due, run: () => { time = due; run() } }
       let at = timers.length
       while (at > 0 && timers[at - 1]!.due > due) at--
@@ -97,46 +110,52 @@ async function once(scenario: Scenario, choose: (depth: number, among: number) =
       return () => { const index = timers.indexOf(timer); if (index >= 0) timers.splice(index, 1) }
     },
     sleep: (ms, options) => new Promise((resolve, reject) => {
-      assertFinite(ms)
+      assertFiniteWait(ms)
       const signal = options?.signal
       if (signal?.aborted) { reject(signal.reason); return }
       let cancel: () => void
-      const onAbort = (): void => {
+      const cleanup = (): void => {
+        sleepCleanups.delete(cleanup)
         signal?.removeEventListener('abort', onAbort)
+      }
+      const onAbort = (): void => {
+        cleanup()
         cancel()
         reject(signal!.reason)
       }
       cancel = clock.after(ms, () => {
-        signal?.removeEventListener('abort', onAbort)
+        cleanup()
         resolve()
       })
-      signal?.addEventListener('abort', onAbort)
+      if (signal) {
+        sleepCleanups.add(cleanup)
+        signal.addEventListener('abort', onAbort)
+      }
     }),
-  }
-  const schedule: Schedule = {
-    clock,
-    outside: () => () => {},
-    later: (lane, run) => into(lane, { what: lane.label, run }),
-    does: (label, ...steps) => { const lane: Lane = { label }; for (const [what, run] of steps) into(lane, { what: `${label}: ${what}`, run }) },
-    work: (label, value) => new Promise((resolve) => { into({ label }, { what: label, run: () => resolve(value) }) }),
-    breaks: (label, error) => new Promise((_, reject) => { into({ label }, { what: label, run: () => reject(error) }) }),
-  }
+  })
   let away = 0
   let landed: (() => void) | undefined
-  schedule.outside = () => {
-    away++
-    let done = false
-    return () => {
-      if (done) return
-      done = true
-      away--
-      const wake = landed
-      landed = undefined
-      wake?.()
-    }
-  }
+  const schedule: Schedule = Object.freeze<Schedule>({
+    clock,
+    later: (lane, run) => into(lane, { what: lane.label, run }),
+    does: (label, ...steps) => { const lane = {}; for (const [what, run] of steps) into(lane, { what: `${label}: ${what}`, run }) },
+    work: (label, value) => new Promise((resolve) => { into({}, { what: label, run: () => resolve(value) }) }),
+    breaks: (label, error) => new Promise((_, reject) => { into({}, { what: label, run: () => reject(error) }) }),
+    outside: () => {
+      away++
+      let done = false
+      return () => {
+        if (done) return
+        done = true
+        away--
+        const wake = landed
+        landed = undefined
+        wake?.()
+      }
+    },
+  })
   const made: Run = { choices: [], counts: [], taken: [] }
-  if (++activeRuns === 1) hold.ref?.()
+  if (++activeRuns === 1) { ensureTurn(); hold!.ref?.() }
   try {
     const check = scenario(schedule)
     for (;;) {
@@ -152,8 +171,11 @@ async function once(scenario: Scenario, choose: (depth: number, among: number) =
       made.taken.push(task.what)
       task.run()
     }
-    check()
-  } catch (error) { made.error = error } finally { if (--activeRuns === 0) hold.unref?.() }
+    await check()
+  } catch (error) { made.error = error } finally {
+    for (const cleanup of [...sleepCleanups]) cleanup()
+    if (--activeRuns === 0) hold!.unref?.()
+  }
   return made
 }
 
@@ -171,12 +193,16 @@ export interface Explored {
  */
 export async function explore(scenario: Scenario, options: { limit?: number } = {}): Promise<Explored> {
   const limit = options.limit ?? 50_000
+  if (!(limit === Number.POSITIVE_INFINITY || (Number.isSafeInteger(limit) && limit >= 1))) {
+    throw new RangeError(`explore expects limit to be a positive safe integer or Infinity, and was given ${String(limit)}`)
+  }
   let prefix: number[] = []
   for (let orderings = 1; ; orderings++) {
     const made = await once(scenario, (depth) => prefix[depth] ?? 0)
     if ('error' in made) return { orderings, complete: false, failure: { choices: made.choices, taken: made.taken, error: made.error } }
     // The next ordering: the last choice that had another way to go, taken that way, and everything after it afresh.
     let last = made.choices.length - 1
+    // Stryker disable next-line ConditionalExpression: at last === -1, undefined + 1 is NaN and NaN >= undefined is false.
     while (last >= 0 && made.choices[last]! + 1 >= made.counts[last]!) last--
     if (last < 0) return { orderings, complete: true }
     if (orderings >= limit) return { orderings, complete: false }
@@ -186,18 +212,36 @@ export async function explore(scenario: Scenario, options: { limit?: number } = 
 
 /** Runs a scenario under orderings chosen at random from a seed, for one with too many to run them all. */
 export async function sample(scenario: Scenario, options: { seed: number; runs: number }): Promise<Explored> {
-  let state = options.seed >>> 0
+  const { seed, runs } = options
+  if (!Number.isFinite(seed)) throw new RangeError(`sample expects a finite seed, and was given ${String(seed)}`)
+  if (!Number.isSafeInteger(runs) || runs < 1) throw new RangeError(`sample expects runs to be a positive safe integer, and was given ${String(runs)}`)
+  let state = seed >>> 0
   const random = (): number => { state = (state + 0x6d2b79f5) >>> 0; let t = state; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296 }
-  for (let orderings = 1; orderings <= options.runs; orderings++) {
+  for (let orderings = 1; orderings <= runs; orderings++) {
     const made = await once(scenario, (_, among) => Math.floor(random() * among))
     if ('error' in made) return { orderings, complete: false, failure: { choices: made.choices, taken: made.taken, error: made.error } }
   }
-  return { orderings: options.runs, complete: false }
+  return { orderings: runs, complete: false }
 }
 
 /** Runs a scenario under one ordering: the choices a failure came back with. Returns what it threw, if it did. */
 export async function replay(scenario: Scenario, choices: readonly number[]): Promise<{ taken: readonly string[]; error?: unknown }> {
-  const made = await once(scenario, (depth) => choices[depth] ?? 0)
+  for (let index = 0; index < choices.length; index++) {
+    const choice = choices[index]!
+    if (!Number.isSafeInteger(choice) || choice < 0) {
+      throw new RangeError(`replay expects non-negative safe integer choices, and got ${String(choice)} at index ${index}`)
+    }
+  }
+  let choiceError: RangeError | undefined
+  const made = await once(scenario, (depth, among) => {
+    const choice = choices[depth] ?? 0
+    if (choice >= among) {
+      choiceError = new RangeError(`replay choice ${choice} at depth ${depth} is out of range for ${among} ready lanes`)
+      throw choiceError
+    }
+    return choice
+  })
+  if (choiceError) throw choiceError
   return 'error' in made ? { taken: made.taken, error: made.error } : { taken: made.taken }
 }
 

@@ -57,21 +57,37 @@ What is in one lane keeps its order. Between lanes the schedule chooses, and tha
 
 | | |
 |---|---|
-| `everyOrder(scenario, { limit? })` | Runs every order and throws for the first that fails, naming each step of it and the choices to replay it with. Returns how many orders there were. Throws past `limit` (50 000 unless given): a scenario too wide to run whole is one to `sample`, said where it is written |
+| `everyOrder(scenario, { limit? })` | Runs every order and throws for the first that fails, naming each step of it and the choices to replay it with. Returns how many orders there were. Throws past `limit` (50 000 unless given; positive safe integer or `Infinity`): a scenario too wide to run whole is one to `sample`, said where it is written |
 | `explore(scenario, { limit? })` | The same without throwing: `{ orderings, complete, failure? }` |
-| `sample(scenario, { seed, runs })` | Orders drawn at random from a seed, the same ones for the same seed, for a scenario with too many to run them all |
-| `replay(scenario, choices)` | One order: the choices a failure came back with |
+| `sample(scenario, { seed, runs })` | Orders drawn at random from a finite `seed` for `runs` (positive safe integer), the same ones for the same seed, for a scenario with too many to run them all |
+| `replay(scenario, choices)` | One order: the choices a failure came back with. Throws `RangeError` if any choice is negative, non-integer, or out of range for the ready lanes |
 
 ## What holds
 
 - **Every order once.** Only a real choice is counted, so two lanes of two steps are six orders and not sixteen.
 - **Promises settle between steps.** After each thing run, everything that can settle does before the next is
-  chosen, so what a step's promise chain does belongs to that step.
-- **A run that never comes to rest is a failure**, after 10 000 steps, and not a hang.
+  chosen, so what a step's promise chain does belongs to that step. Post-condition checks may be synchronous or `async`.
+- **A run that never comes to rest is a failure**, after 10 000 steps, and not a hang. Pending `sleep()` abort
+  listeners are detached even if a run throws or hits the runaway guard.
 - **Runs do not share anything.** Two explorations under way at once do not disturb each other.
-- **No dependencies**, and it runs in Node and in a window from one source.
+- **Full `@apackdev/clock` parity.** `schedule.clock` exposes frozen `now()`, `monotonic()`, `after()`, and `sleep()`,
+  rejects non-finite waits and overflowing deadlines with `RangeError`, and supports `AbortSignal` on `sleep()`.
+- **No dependencies**, and it runs in Node, Chromium, Firefox, WebKit, and dedicated Web Workers from one source.
 
-## Installing
+## How it is checked
+
+- **Cross-runtime specs:** unit specs ([tests/orderings.spec.ts](tests/orderings.spec.ts)) and dedicated Web Worker
+  specs ([tests/worker.spec.ts](tests/worker.spec.ts)) run in Node on Linux, macOS, and Windows, and in Chromium,
+  Firefox, and WebKit.
+- **Every mutant is caught:** `npm run mutants` mutates `src/` and fails CI if a single mutant survives.
+- **Packaging & floor types:** `package:check` verifies byte-for-byte build determinism and size ceilings;
+  `package:lint` runs `publint` and `attw`; `package:smoke` typechecks the packed tarball against TypeScript `>= 5.7`
+  for both browser (`ES2023+DOM`, `types: []`) and Node (`ES2023`) consumers and runs the README example.
+
+## Requirements & installing
+
+- **Runtime:** Node `>= 24.12.0`, or any browser / Web Worker with `MessageChannel` and `AbortSignal`.
+- **Types:** TypeScript `>= 5.7` (tested against `ES2023` consumers with `skipLibCheck: false` and no `ESNext.Disposable`).
 
 It is not on npm. Each `master` commit whose CI passed has a prerelease, `pkg-<commit>`, holding the package as
 `npm pack` writes it, and a consumer installs it by that asset's URL:
