@@ -24,6 +24,7 @@ describe('Node process exit lifecycle', () => {
     `)
     expect(result.signal).toBeNull()
     expect(result.status).toBe(0)
+    expect(result.stderr).toBe('')
     expect(result.stdout).toBe('imported')
   })
 
@@ -39,6 +40,7 @@ describe('Node process exit lifecycle', () => {
     `)
     expect(result.signal).toBeNull()
     expect(result.status).toBe(0)
+    expect(result.stderr).toBe('')
     expect(result.stdout).toBe('ran:2')
   })
 
@@ -58,6 +60,7 @@ describe('Node process exit lifecycle', () => {
     `)
     expect(result.signal).toBeNull()
     expect(result.status).toBe(0)
+    expect(result.stderr).toBe('')
     expect(result.stdout).toBe('1,6')
   })
 
@@ -78,6 +81,7 @@ describe('Node process exit lifecycle', () => {
     `)
     expect(result.signal).toBeNull()
     expect(result.status).toBe(0)
+    expect(result.stderr).toBe('')
     expect(result.stdout).toBe('1,20')
   })
 })

@@ -76,9 +76,10 @@ What is in one lane keeps its order. Between lanes the schedule chooses, and tha
 
 ## How it is checked
 
-- **Cross-runtime specs:** unit specs ([tests/orderings.spec.ts](tests/orderings.spec.ts)) and dedicated Web Worker
-  specs ([tests/worker.spec.ts](tests/worker.spec.ts)) run in Node on Linux, macOS, and Windows, and in Chromium,
-  Firefox, and WebKit.
+- **Cross-runtime specs:** unit specs ([tests/orderings.spec.ts](tests/orderings.spec.ts)), Node child-process exit
+  specs ([tests/node-exit.spec.ts](tests/node-exit.spec.ts)), and dedicated Web Worker specs
+  ([tests/worker.spec.ts](tests/worker.spec.ts)) run in Node on Linux, macOS, and Windows, and in Chromium, Firefox,
+  and WebKit.
 - **Every mutant is caught:** `npm run mutants` mutates `src/` and fails CI if a single mutant survives.
 - **Packaging & floor types:** `package:check` verifies byte-for-byte build determinism and size ceilings;
   `package:lint` runs `publint` and `attw`; `package:smoke` typechecks the packed tarball against TypeScript `>= 5.7`
