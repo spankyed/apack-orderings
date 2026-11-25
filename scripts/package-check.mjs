@@ -33,15 +33,15 @@ for (const [name, hash] of first) {
   }
 }
 
-const indexJsBytes = fs.readFileSync(path.join(distDir, 'index.js'))
-const jsRaw = indexJsBytes.length
-const jsGzip = gzipSync(indexJsBytes, { level: 9 }).length
+const jsFiles = fs.readdirSync(distDir).filter((name) => name.endsWith('.js')).sort()
+const jsRaw = jsFiles.reduce((sum, name) => sum + fs.readFileSync(path.join(distDir, name)).length, 0)
+const jsGzip = jsFiles.reduce((sum, name) => sum + gzipSync(fs.readFileSync(path.join(distDir, name)), { level: 9 }).length, 0)
 const dtsBytes = fs.readFileSync(path.join(distDir, 'index.d.ts'))
 
-const MAX_JS_RAW = 12_000
-const MAX_JS_GZIP = 4_000
-if (jsRaw > MAX_JS_RAW) throw new Error(`dist/index.js grew to ${jsRaw} B (limit ${MAX_JS_RAW} B)`)
-if (jsGzip > MAX_JS_GZIP) throw new Error(`dist/index.js gzip grew to ${jsGzip} B (limit ${MAX_JS_GZIP} B)`)
+const MAX_JS_RAW = 36_000
+const MAX_JS_GZIP = 10_000
+if (jsRaw > MAX_JS_RAW) throw new Error(`dist/*.js grew to ${jsRaw} B (limit ${MAX_JS_RAW} B)`)
+if (jsGzip > MAX_JS_GZIP) throw new Error(`dist/*.js gzip grew to ${jsGzip} B (limit ${MAX_JS_GZIP} B)`)
 
 const { everyOrder } = await import(pathToFileURL(path.join(distDir, 'index.js')).href)
 const started = performance.now()
@@ -56,6 +56,6 @@ if (count !== 20) throw new Error(`Expected 20 orderings for 3x3, got ${count}`)
 
 console.log(
   `reproducible build verified (${first.size} files, sha256=${first.get('index.js').slice(0, 12)}), ` +
-  `index.js=${jsRaw} B (${jsGzip} B gzip), d.ts=${dtsBytes.length} B, ` +
+  `js=${jsRaw} B (${jsGzip} B gzip), d.ts=${dtsBytes.length} B, ` +
   `3x3 (${count} orderings)=${elapsedMs.toFixed(2)} ms`,
 )
