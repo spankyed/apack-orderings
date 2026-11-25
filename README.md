@@ -40,6 +40,8 @@ the count is 1
 
 ## What a scenario is given
 
+> **The soundness trade:** Untracked scenarios run plain unreduced search by construction — Optimal DPOR never runs unless a task opts into `{ tracked: true }`. Once a scenario opts tasks into `{ tracked: true }`, soundness depends on every shared mutable read and write being reported with `read()`/`write()`; a missed declaration silently skips real orderings. `auditIndependence()` is a sampled probe that catches most omissions loudly, not a formal proof.
+
 A scenario is a function of a `Schedule` that builds what it checks and returns what must hold at rest.
 
 | | |
@@ -67,7 +69,7 @@ What is in one lane keeps its order. Between lanes the schedule chooses, and tha
 
 ## What holds
 
-- **Every order once — or once per equivalence class.** Only a real choice is counted, so two lanes of two steps are six orders and not sixteen. Untracked tasks conflict globally (sound by default); when adapters opt tasks into `{ tracked: true }` and record `read()`/`write()` on `schedule.resource()` tokens, Optimal DPOR (Abdulla et al., wakeup trees) explores one representative ordering per Mazurkiewicz equivalence class (skipping sleep-set-blocked disabling branches cleanly).
+- **Every order once — or once per equivalence class.** Only a real choice is counted, so two lanes of two steps are six orders and not sixteen. Untracked scenarios fall back directly to plain unreduced search (sound by construction); when adapters opt tasks into `{ tracked: true }` and record `read()`/`write()` on `schedule.resource()` tokens, Optimal DPOR (Abdulla et al., wakeup trees) explores one representative ordering per Mazurkiewicz equivalence class (skipping sleep-set-blocked disabling branches cleanly).
 - **Promises settle between steps.** After each thing run, everything that can settle does before the next is
   chosen, so what a step's promise chain does belongs to that step. Post-condition checks may be synchronous or `async`.
 - **A run that never comes to rest is a failure**, after 10 000 steps, and not a hang. Pending `sleep()` abort

@@ -7,6 +7,9 @@ on:
   push:
     branches: [master]
   pull_request:
+  schedule:
+    # Nightly deep differential fuzzing of Optimal DPOR against unreduced exploration.
+    - cron: '0 6 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -76,10 +79,26 @@ jobs:
       - run: npm ci
       - run: npm run mutants
 
+  # Differential oracle comparing Optimal DPOR against unreduced exploration across hundreds of generated programs.
+  fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Run differential fuzzer
+        env:
+          FUZZ_PROGRAMS: ${{ github.event_name == 'schedule' && '2000' || '500' }}
+        run: npm run fuzz
+
   # The one check a release waits on: every job above passed.
   ci-pass:
     if: always()
-    needs: [suite, browser, mutants]
+    needs: [suite, browser, mutants, fuzz]
     runs-on: ubuntu-24.04
     steps:
-      - run: test "${{ needs.suite.result }}" = "success" -a "${{ needs.browser.result }}" = "success" -a "${{ needs.mutants.result }}" = "success"
+      - run: test "${{ needs.suite.result }}" = "success" -a "${{ needs.browser.result }}" = "success" -a "${{ needs.mutants.result }}" = "success" -a "${{ needs.fuzz.result }}" = "success"

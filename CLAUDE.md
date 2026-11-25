@@ -40,6 +40,7 @@ npm run typecheck
 npm run typecheck:floor
 npm test
 npm run test:browser
+npm run fuzz
 npm run mutants
 npm run build
 npm run package:check
