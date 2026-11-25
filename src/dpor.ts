@@ -111,12 +111,10 @@ export const insertWut = (root: WutNode, sleep: ReadonlyMap<string, StepAccess>,
 export interface Wakeup {
   readonly depth: number
   readonly seq: readonly StepRef[]
-  /** Present when this sequence only applies if `'clock'` is already in `sleep` at `depth`. */
-  readonly whenClockSleeping?: true
 }
 
 /**
- * Computes all reversible immediate races (and clock preemption/cancellation points) along `steps` in a single
+ * Computes all reversible immediate races (and clock cancellation/preemption points) along `steps` in a single
  * reverse-topological bitset sweep, returning `Wakeup` entries to insert into each depth's wakeup tree.
  */
 export const findWakeups = (steps: readonly TraceStep[]): Wakeup[] => {
@@ -151,18 +149,10 @@ export const findWakeups = (steps: readonly TraceStep[]): Wakeup[] => {
       // Stryker disable next-line EqualityOperator: at w === words, rowJ[words] is undefined and Uint32Array ignores out-of-bounds writes.
       for (let w = 0; w < words; w++) rowI[w]! |= rowJ[w]!
     }
-    // Disabling / preemption: if step `i` cancelled or preempted a previously-pending timer, allow `clock` to run
-    // first. When `clock` is already sleeping at `i`, also allow non-dependent suffix steps to run before `clock` so
-    // any step conflicting with the sleeping `clock` can evict it before `i` cancels the timer.
+    // Disabling / preemption: timer operations are globally conflicting, so `clock` can never persist in `sleep`
+    // across a step; emitting a single `['clock']` wakeup suffices when `i` cancels or preempts a pending timer.
     if (stepI.preemptedClock) {
       found.push({ depth: i, seq: [{ laneId: 'clock', access: GLOBAL_ACCESS }] })
-      const prefix: StepRef[] = []
-      for (let k = i + 1; k < n; k++) {
-        if ((rowI[k >>> 5]! & (1 << (k & 31))) === 0 && steps[k]!.laneId !== 'clock') {
-          prefix.push({ laneId: steps[k]!.laneId, access: steps[k]!.access })
-          found.push({ depth: i, seq: [...prefix, { laneId: 'clock', access: GLOBAL_ACCESS }], whenClockSleeping: true })
-        }
-      }
     }
   }
 

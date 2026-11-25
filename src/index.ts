@@ -63,13 +63,14 @@ export interface Clock {
   /**
    * Runs `run` once, `ms` from now, when the schedule gets to it. Returns an idempotent cancel function.
    * Negative finite waits are treated as `0`. Throws `RangeError` for a non-finite `ms` or overflowing deadline.
+   * Timer scheduling, cancellation, and firing are currently globally conflicting under reduction for soundness.
    */
   after(ms: number, run: () => void, options?: TaskOptions): () => void
   /**
    * Resolves `ms` from now, when the schedule gets to it. Rejects with `RangeError` for a non-finite `ms` or
-   * overflowing deadline, or with `options.signal.reason` if aborted. Aborts after `sleep()` is called are tracked
-   * automatically; if a tracked task can abort the `AbortController` before `sleep()` is even called, guard that
-   * controller with a `Resource`.
+   * overflowing deadline, or with `options.signal.reason` if aborted. Timer scheduling, cancellation, and firing are
+   * currently globally conflicting under reduction for soundness; if a tracked task can abort the `AbortController`
+   * before `sleep()` is called, guard that controller with a `Resource`.
    */
   sleep(ms: number, options?: { readonly signal?: AbortSignal; readonly tracked?: boolean }): Promise<void>
 }
@@ -236,7 +237,6 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
 
   const nextSetupSpawn = makeCounter()
   const nextSetupResource = makeCounter()
-  const nextSetupTimer = makeCounter()
   let away = 0
   let landed: (() => void) | undefined
   let activeStep: {
@@ -246,12 +246,12 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
     readonly access: StepAccess
     readonly nextSpawn: () => number
     readonly nextResource: () => number
-    readonly nextTimer: () => number
     preemptedClock: boolean
   } | undefined
 
   const recordReadId = (id: string): void => { activeStep?.access.reads.add(id) }
   const recordWriteId = (id: string): void => { activeStep?.access.writes.add(id) }
+  const markGlobal = (): void => { if (activeStep) activeStep.access.global = true }
   const resolveResource = (resource: Resource): string => {
     const id = resourceIds.get(resource)
     if (!id) throw new Error('Resource does not belong to this schedule run; allocate it with schedule.resource() inside the scenario')
@@ -282,86 +282,67 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
   }
 
   // The clock's timers: a lane kept in the order they are due, and of two due at once, the one set first.
+  // Timer scheduling, cancellation, and firing are marked globally conflicting so the shared priority-queue `clock`
+  // lane cannot violate wakeup-tree DPOR's non-disabling / stable-identity assumptions.
   let time = 0
   const timers: Array<Task & { readonly due: number }> = []
   const sleepCleanups = new Set<() => void>()
-  const scheduleTimer = (ms: number, run: () => void, options?: TaskOptions): { readonly cancel: () => void; readonly timerId: string } => {
+  const scheduleTimer = (ms: number, run: () => void): (() => void) => {
     assertFiniteWait(ms)
-    recordReadId('sys:clock')
     const due = time + Math.max(0, ms)
     if (!Number.isFinite(due)) throw new RangeError(`A clock wait of ${String(ms)} ms overflows the scenario clock`)
-    // Stryker disable next-line StringLiteral: opaque internal conflict key; only scheduleTimer writes it and no other key is empty.
-    recordWriteId('push:clock')
-    const timerId = activeStep
-      ? `timer:${activeStep.laneId}.${activeStep.laneSeq}:${activeStep.nextTimer()}`
-      : `timer:0:${nextSetupTimer()}`
+    markGlobal()
     const creator = pushedByNow()
     const timer: Task & { readonly due: number } = {
       what: `the clock: ${due} ms`,
-      tracked: options?.tracked === true,
+      tracked: false,
       pushedBy: creator,
       due,
       run: () => {
-        recordWriteId(timerId)
-        if (due > time) { time = due; recordWriteId('sys:clock') }
+        time = due
         run()
       },
     }
     let at = timers.length
     while (at > 0 && timers[at - 1]!.due > due) at--
     const step = activeStep
-    if (step && timers.slice(at).some((existing) => existing.pushedBy !== step.index)) {
+    if (step && timers.some((existing) => existing.pushedBy !== step.index)) {
       step.preemptedClock = true
     }
     timers.splice(at, 0, timer)
     lanes.set('clock', timers)
     wake()
-    return {
-      timerId,
-      cancel: () => {
-        recordWriteId(timerId)
-        const index = timers.indexOf(timer)
-        if (index >= 0) {
-          if (activeStep && creator !== activeStep.index) activeStep.preemptedClock = true
-          timers.splice(index, 1)
-        }
-      },
+    return () => {
+      markGlobal()
+      const index = timers.indexOf(timer)
+      if (index >= 0) {
+        if (activeStep && creator !== activeStep.index) activeStep.preemptedClock = true
+        timers.splice(index, 1)
+      }
     }
   }
   const clock: Clock = Object.freeze<Clock>({
-    now: () => { recordReadId('sys:clock'); return time },
-    monotonic: () => { recordReadId('sys:clock'); return time },
-    after: (ms, run, options) => scheduleTimer(ms, run, options).cancel,
+    now: () => time,
+    monotonic: () => time,
+    after: (ms, run) => scheduleTimer(ms, run),
     sleep: (ms, options) => new Promise((resolve, reject) => {
       assertFiniteWait(ms)
       const signal = options?.signal
       if (signal?.aborted) { reject(signal.reason); return }
       let cancel!: () => void
-      let timerId!: string
       const cleanup = (): void => {
         sleepCleanups.delete(cleanup)
         signal!.removeEventListener('abort', onAbort)
-        signal!.removeEventListener('abort', onLateAbort)
-      }
-      const onLateAbort = (): void => {
-        cleanup()
-        recordWriteId(timerId)
       }
       const onAbort = (): void => {
         cleanup()
         cancel()
         reject(signal!.reason)
       }
-      const scheduled = scheduleTimer(ms, () => {
-        if (signal) {
-          signal.removeEventListener('abort', onAbort)
-          // Keep a passive listener for the rest of this run so a later abort records the race against firing.
-          signal.addEventListener('abort', onLateAbort)
-        }
+      cancel = scheduleTimer(ms, () => {
+        if (signal) cleanup()
         resolve()
-      }, options?.tracked ? { tracked: true } : undefined)
-      cancel = scheduled.cancel
-      timerId = scheduled.timerId
+      })
       if (signal) {
         sleepCleanups.add(cleanup)
         signal.addEventListener('abort', onAbort)
@@ -442,7 +423,6 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
         access,
         nextSpawn: makeCounter(),
         nextResource: makeCounter(),
-        nextTimer: makeCounter(),
         preemptedClock: false,
       }
       made.taken.push(task.what)
@@ -518,9 +498,8 @@ async function exploreOptimal(scenario: Scenario, limit: number, first: Run): Pr
     observedParent: StepAccess | undefined,
   ): Promise<StepAccess | undefined> => {
     // Detect reversible races along the full trace and insert wakeup sequences into each frame's wakeup tree.
-    for (const { depth, seq, whenClockSleeping } of findWakeups(steps)) {
+    for (const { depth, seq } of findWakeups(steps)) {
       const frame = stack[depth]!
-      if (whenClockSleeping && !frame.sleep.has('clock')) continue
       insertWut(frame.wut, frame.sleep, seq)
     }
 
@@ -607,6 +586,8 @@ async function exploreOptimal(scenario: Scenario, limit: number, first: Run): Pr
     const observedParent = steps[baseDepth - 1]!.access
 
     // Push stack frames for every step from `baseDepth` onwards (including single-ready steps so depth indices align).
+    // Replacing `wut.children[0].node` with a fresh empty node is safe: deeper frames already hold the original child
+    // nodes via `wutByDepth`, and no wakeup inserted at depth `d` ever descends through `steps[d].laneId`.
     for (let d = baseDepth; d < steps.length; d++) {
       const step = steps[d]!
       const sleep = sleepByDepth.get(d)!

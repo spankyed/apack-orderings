@@ -82,7 +82,7 @@ jobs:
       - run: npm ci
       - run: npm run mutants
 
-  # Differential oracle comparing Optimal DPOR against unreduced exploration across hundreds of generated programs.
+  # Differential oracle comparing wakeup-tree DPOR against unreduced exploration across randomized nested programs.
   fuzz:
     runs-on: ubuntu-24.04
     steps:
@@ -94,12 +94,30 @@ jobs:
       - run: npm ci
       - name: Run differential fuzzer
         env:
-          FUZZ_PROGRAMS: ${{ github.event_name == 'schedule' && '2000' || '500' }}
+          FUZZ_PROGRAMS: ${{ github.event_name == 'schedule' && '2100' || '600' }}
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
             export FUZZ_SEED="$(date -u +%Y%m%d)"
           fi
           npm run fuzz
+
+  # Report nightly fuzz failures (and close on recovery) via a single issue on master.
+  nightly-status:
+    if: ${{ !cancelled() && github.event_name == 'schedule' && github.ref == 'refs/heads/master' }}
+    needs: [fuzz]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash .github/scripts/master-status.sh ${{ needs.fuzz.result == 'success' && 'passed' || 'failed' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          WORKFLOW: CI (nightly fuzz)
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
 
   # The one check a release waits on: every job above passed.
   ci-pass:
