@@ -147,6 +147,38 @@ describe('a schedule', () => {
       return () => {}
     })
     expect(immediate).toBe(1)
+
+    // Streaming outside work: queueing into a lane or clock while still holding an outside handle wakes the loop immediately.
+    const streamed: string[] = []
+    const streamOrderings = await everyOrder((schedule) => {
+      const lane = { label: 'stream' }
+      const done = schedule.outside()
+      setTimeout(() => {
+        schedule.later(lane, () => {
+          streamed.push('chunk1')
+          schedule.clock.after(10, () => {
+            streamed.push('tick')
+            done()
+          })
+        })
+      }, 5)
+      return () => { expect(streamed).toEqual(['chunk1', 'tick']) }
+    })
+    expect(streamOrderings).toBe(1)
+
+    // Scheduling directly on the clock while asleep on outside() also wakes the loop before release.
+    const clockStreamed: string[] = []
+    const clockStreamOrderings = await everyOrder((schedule) => {
+      const done = schedule.outside()
+      setTimeout(() => {
+        schedule.clock.after(5, () => {
+          clockStreamed.push('clock-wake')
+          done()
+        })
+      }, 5)
+      return () => { expect(clockStreamed).toEqual(['clock-wake']) }
+    })
+    expect(clockStreamOrderings).toBe(1)
   })
 
   it('samples the same orders from the same seed, reports failures, and validates seed and runs', async () => {
@@ -285,9 +317,7 @@ describe('a schedule', () => {
     expect(traced.taken).toEqual(['the clock: 25 ms'])
   })
 
-  it('rejects non-finite or overflowing waits and supports AbortSignal cancellation with listener cleanup on clock.sleep()', async () => {
-    let sawMidWoke = false
-    let sawMidAborted = false
+  it('rejects non-finite and overflowing waits on clock.after() and clock.sleep()', async () => {
     await everyOrder((schedule) => {
       const { clock } = schedule
       for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
@@ -305,11 +335,29 @@ describe('a schedule', () => {
 
       const errors: unknown[] = []
       void clock.sleep(Number.NaN).catch((error) => { errors.push(error) })
+      const already = new AbortController()
+      already.abort(new Error('already'))
+      // Non-finite validation runs before the already-aborted check, matching @apackdev/clock.
+      void clock.sleep(Number.NaN, { signal: already.signal }).catch((error) => { errors.push(error) })
+
+      return () => {
+        expect(overflowAfter).toBe(true)
+        expect(overflowSleep).toBeInstanceOf(RangeError)
+        expect(errors).toHaveLength(2)
+        for (const error of errors) expect(error).toBeInstanceOf(RangeError)
+      }
+    })
+  })
+
+  it('supports AbortSignal cancellation with listener cleanup on clock.sleep()', async () => {
+    let sawMidWoke = false
+    let sawMidAborted = false
+    await everyOrder((schedule) => {
+      const { clock } = schedule
 
       const already = new AbortController()
       const alreadyReason = new Error('already')
       already.abort(alreadyReason)
-      void clock.sleep(Number.NaN, { signal: already.signal }).catch((error) => { errors.push(error) })
       let alreadyCaught: unknown
       void clock.sleep(50, { signal: already.signal }).catch((error) => { alreadyCaught = error })
 
@@ -327,10 +375,6 @@ describe('a schedule', () => {
       schedule.does('canceller', ['abort', () => { mid.abort(midReason) }])
 
       return () => {
-        expect(overflowAfter).toBe(true)
-        expect(overflowSleep).toBeInstanceOf(RangeError)
-        expect(errors).toHaveLength(2)
-        for (const error of errors) expect(error).toBeInstanceOf(RangeError)
         expect(alreadyCaught).toBe(alreadyReason)
         expect(normalWoke).toBe(true)
         expect(removeNormal).toHaveBeenCalledWith('abort', expect.any(Function))

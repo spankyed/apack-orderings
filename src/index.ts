@@ -89,7 +89,17 @@ const assertFiniteWait = (ms: number): void => {
 
 async function once(scenario: Scenario, choose: (depth: number, among: number) => number): Promise<Run> {
   const lanes = new Map<object, Task[]>()
-  const into = (lane: object, task: Task): void => { (lanes.get(lane) ?? lanes.set(lane, []).get(lane)!).push(task) }
+  let away = 0
+  let landed: (() => void) | undefined
+  const wake = (): void => {
+    const pending = landed
+    landed = undefined
+    pending?.()
+  }
+  const into = (lane: object, task: Task): void => {
+    (lanes.get(lane) ?? lanes.set(lane, []).get(lane)!).push(task)
+    wake()
+  }
   // The clock's timers: a lane kept in the order they are due, and of two due at once, the one set first.
   let time = 0
   const timers: Array<Task & { readonly due: number }> = []
@@ -107,6 +117,7 @@ async function once(scenario: Scenario, choose: (depth: number, among: number) =
       while (at > 0 && timers[at - 1]!.due > due) at--
       timers.splice(at, 0, timer)
       lanes.set(clockLane, timers)
+      wake()
       return () => { const index = timers.indexOf(timer); if (index >= 0) timers.splice(index, 1) }
     },
     sleep: (ms, options) => new Promise((resolve, reject) => {
@@ -133,8 +144,6 @@ async function once(scenario: Scenario, choose: (depth: number, among: number) =
       }
     }),
   })
-  let away = 0
-  let landed: (() => void) | undefined
   const schedule: Schedule = Object.freeze<Schedule>({
     clock,
     later: (lane, run) => into(lane, { what: lane.label, run }),
@@ -148,9 +157,7 @@ async function once(scenario: Scenario, choose: (depth: number, among: number) =
         if (done) return
         done = true
         away--
-        const wake = landed
-        landed = undefined
-        wake?.()
+        wake()
       }
     },
   })
