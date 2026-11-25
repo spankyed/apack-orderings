@@ -1,9 +1,9 @@
 // Standalone differential fuzzer comparing Optimal DPOR (`reduce: true`) against full unreduced exploration
-// (`reduce: false`) across hundreds of randomized concurrent programs. Runs against the built `dist/index.js`.
+// (`reduce: false`) across hundreds of randomized concurrent programs. Runs directly against `src/index.ts`.
 //
 //   npm run fuzz
 //   FUZZ_PROGRAMS=1000 FUZZ_SEED=7 npm run fuzz
-import { explore } from '../dist/index.js'
+import { explore } from '../src/index.ts'
 import { runDifferentialFuzz } from '../tests/support/fuzz-programs.ts'
 
 const programs = Number.parseInt(process.env.FUZZ_PROGRAMS ?? '500', 10)

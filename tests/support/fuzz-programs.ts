@@ -84,7 +84,7 @@ export async function runDifferentialFuzz(
     const makeScenario = (states: Set<string>): Scenario => (schedule) => {
       const regTokens = Array.from({ length: numRegs }, (_, i) => schedule.resource(`r${i}`))
       const regs = Array<number>(numRegs).fill(0)
-      const reads: number[] = []
+      const reads: string[] = []
       const sharedLog: number[] = []
       const sharedLogTok = schedule.resource('sharedLog')
       const sharedLane = { label: 'shared-dyn' }
@@ -107,11 +107,11 @@ export async function runDifferentialFuzz(
         )
       }
 
-      const runOp = (op: Op, tracked: boolean): void => {
+      const runOp = (op: Op, tracked: boolean, site: string): void => {
         switch (op.kind) {
           case 'read':
             schedule.read(regTokens[op.reg]!)
-            reads.push(regs[op.reg]!)
+            reads.push(`${site}:${regs[op.reg]!}`)
             return
           case 'write':
             schedule.write(regTokens[op.reg]!)
@@ -129,7 +129,7 @@ export async function runDifferentialFuzz(
             regs[op.reg] = regs[op.reg]! + 1
             return
           case 'readClock':
-            reads.push(schedule.clock.monotonic())
+            reads.push(`${site}:${schedule.clock.monotonic()}`)
             return
           case 'spawn':
             schedule.later({ label: `spawn-${op.reg}-${op.val}` }, () => {
@@ -149,7 +149,7 @@ export async function runDifferentialFuzz(
             schedule.clock.after(op.delay, () => {
               schedule.write(regTokens[op.reg]!)
               regs[op.reg] = op.val
-              reads.push(schedule.clock.now())
+              reads.push(`${site}:${schedule.clock.now()}`)
             }, { tracked })
             return
           case 'work':
@@ -179,18 +179,19 @@ export async function runDifferentialFuzz(
         if (useDoesForLast && l === numLanes - 1) {
           schedule.does(
             tracked ? { label: `does-${l}`, tracked: true } : `does-${l}`,
-            ...ops.map((op, idx) => [`op-${idx}`, () => runOp(op, tracked)] as const),
+            ...ops.map((op, idx) => [`op-${idx}`, () => runOp(op, tracked, `${l}.${idx}`)] as const),
           )
         } else {
           const lane = { label: `lane-${l}` }
-          for (const op of ops) {
-            schedule.later(lane, () => runOp(op, tracked), { tracked })
+          for (let idx = 0; idx < ops.length; idx++) {
+            const op = ops[idx]!
+            schedule.later(lane, () => runOp(op, tracked, `${l}.${idx}`), { tracked })
           }
         }
       }
 
       return () => {
-        const state = `${regs.join(',')}|${[...reads].sort((a, b) => a - b).join(',')}|${sharedLog.join(',')}|${timerFired}|${sleepOutcome}`
+        const state = `${regs.join(',')}|${[...reads].sort().join(',')}|${sharedLog.join(',')}|${timerFired}|${sleepOutcome}`
         states.add(state)
       }
     }

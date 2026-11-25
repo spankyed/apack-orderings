@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   suite:
+    if: github.event_name != 'schedule'
     name: suite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -47,6 +48,7 @@ jobs:
   # The schedule's specs in real browser engines and dedicated Web Workers: Chromium, Firefox, and WebKit via vitest's
   # browser mode and Playwright. Runs on macos-15 so all three engines install cleanly without Ubuntu's WebKit apt stack.
   browser:
+    if: github.event_name != 'schedule'
     name: browser (chromium, firefox, webkit)
     runs-on: macos-15
     steps:
@@ -69,6 +71,7 @@ jobs:
 
   # Every mutant of the source, run against the specs: one that survives fails.
   mutants:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -89,15 +92,18 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run build
       - name: Run differential fuzzer
         env:
           FUZZ_PROGRAMS: ${{ github.event_name == 'schedule' && '2000' || '500' }}
-        run: npm run fuzz
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            export FUZZ_SEED="$(date -u +%Y%m%d)"
+          fi
+          npm run fuzz
 
   # The one check a release waits on: every job above passed.
   ci-pass:
-    if: always()
+    if: always() && github.event_name != 'schedule'
     needs: [suite, browser, mutants, fuzz]
     runs-on: ubuntu-24.04
     steps:
