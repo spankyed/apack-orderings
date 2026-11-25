@@ -49,7 +49,8 @@ export interface Schedule {
   /**
    * Something outside the schedule is under way, such as a message on a real socket: the run does not come to rest
    * until what is returned is called. What it does when it lands, it puts into a lane, and the schedule chooses as
-   * ever. Nothing outside is chosen: it lands when it lands.
+   * ever. Nothing outside is chosen: it lands when it lands. If the returned callback is never called, the run waits
+   * indefinitely (the runaway guard counts tasks, not wall time).
    */
   outside(): () => void
   /** The scenario's clock, which the schedule moves. */
@@ -217,12 +218,17 @@ export async function explore(scenario: Scenario, options: { limit?: number } = 
   }
 }
 
-/** Runs a scenario under orderings chosen at random from a seed, for one with too many to run them all. */
+/**
+ * Runs a scenario under orderings chosen at random from a 32-bit unsigned integer `seed`, for one with too many to
+ * run them all.
+ */
 export async function sample(scenario: Scenario, options: { seed: number; runs: number }): Promise<Explored> {
   const { seed, runs } = options
-  if (!Number.isFinite(seed)) throw new RangeError(`sample expects a finite seed, and was given ${String(seed)}`)
+  if (!Number.isInteger(seed) || seed < 0 || seed > 0xffff_ffff) {
+    throw new RangeError(`sample expects seed to be a 32-bit unsigned integer, and was given ${String(seed)}`)
+  }
   if (!Number.isSafeInteger(runs) || runs < 1) throw new RangeError(`sample expects runs to be a positive safe integer, and was given ${String(runs)}`)
-  let state = seed >>> 0
+  let state = seed
   const random = (): number => { state = (state + 0x6d2b79f5) >>> 0; let t = state; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296 }
   for (let orderings = 1; orderings <= runs; orderings++) {
     const made = await once(scenario, (_, among) => Math.floor(random() * among))
@@ -231,7 +237,11 @@ export async function sample(scenario: Scenario, options: { seed: number; runs: 
   return { orderings: runs, complete: false }
 }
 
-/** Runs a scenario under one ordering: the choices a failure came back with. Returns what it threw, if it did. */
+/**
+ * Runs a scenario under one ordering: the choices a failure came back with. Returns what it threw, if it did.
+ * Throws `RangeError` if any choice is invalid or out of range, or if the recording does not match the scenario
+ * (ran out of choices or left unused trailing choices).
+ */
 export async function replay(scenario: Scenario, choices: readonly number[]): Promise<{ taken: readonly string[]; error?: unknown }> {
   for (let index = 0; index < choices.length; index++) {
     const choice = choices[index]!
@@ -241,7 +251,11 @@ export async function replay(scenario: Scenario, choices: readonly number[]): Pr
   }
   let choiceError: RangeError | undefined
   const made = await once(scenario, (depth, among) => {
-    const choice = choices[depth] ?? 0
+    if (depth >= choices.length) {
+      choiceError = new RangeError(`replay ran out of choices at depth ${depth} (given ${choices.length})`)
+      throw choiceError
+    }
+    const choice = choices[depth]!
     if (choice >= among) {
       choiceError = new RangeError(`replay choice ${choice} at depth ${depth} is out of range for ${among} ready lanes`)
       throw choiceError
@@ -249,6 +263,12 @@ export async function replay(scenario: Scenario, choices: readonly number[]): Pr
     return choice
   })
   if (choiceError) throw choiceError
+  if (made.choices.length < choices.length) {
+    throw new RangeError(
+      `replay was given ${choices.length} choices, but the scenario only made ${made.choices.length}`,
+      'error' in made ? { cause: made.error } : undefined,
+    )
+  }
   return 'error' in made ? { taken: made.taken, error: made.error } : { taken: made.taken }
 }
 

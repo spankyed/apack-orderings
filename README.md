@@ -48,7 +48,7 @@ A scenario is a function of a `Schedule` that builds what it checks and returns 
 | `does(label, ...steps)` | A lane of the spec's own: things done one after another, such as what a user clicks |
 | `work(label, value)` | Outside work in a lane of its own: a promise that resolves, with this value, when the schedule gets to it |
 | `breaks(label, error)` | The same, for work that fails |
-| `outside()` | Says something outside the schedule is under way, such as a message on a real socket. The run does not come to rest until what it returns is called |
+| `outside()` | Says something outside the schedule is under way, such as a message on a real socket. The run does not come to rest until what it returns is called; if never called, the run waits indefinitely |
 | `clock` | The scenario's clock: `now()`, `monotonic()`, `after(ms, run)` and `sleep(ms, { signal? })`. It moves only when the schedule runs one of its timers, in the order they are due, so no test waits on real time |
 
 What is in one lane keeps its order. Between lanes the schedule chooses, and that is all it may choose.
@@ -59,8 +59,8 @@ What is in one lane keeps its order. Between lanes the schedule chooses, and tha
 |---|---|
 | `everyOrder(scenario, { limit? })` | Runs every order and throws for the first that fails, naming each step of it and the choices to replay it with. Returns how many orders there were. Throws past `limit` (50 000 unless given; positive safe integer or `Infinity`): a scenario too wide to run whole is one to `sample`, said where it is written |
 | `explore(scenario, { limit? })` | The same without throwing: `{ orderings, complete, failure? }` |
-| `sample(scenario, { seed, runs })` | Orders drawn at random from a finite `seed` for `runs` (positive safe integer), the same ones for the same seed, for a scenario with too many to run them all |
-| `replay(scenario, choices)` | One order: the choices a failure came back with. Throws `RangeError` if any choice is negative, non-integer, or out of range for the ready lanes |
+| `sample(scenario, { seed, runs })` | Orders drawn at random from a 32-bit unsigned integer `seed` for `runs` (positive safe integer), the same ones for the same seed, for a scenario with too many to run them all |
+| `replay(scenario, choices)` | One order: the choices a failure came back with. Throws `RangeError` if any choice is negative, non-integer, or out of range, or if the recording is stale (ran out of choices or left unused trailing choices) |
 
 ## What holds
 

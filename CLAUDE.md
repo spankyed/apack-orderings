@@ -9,8 +9,9 @@ what to know before changing it.
   handed, one run of a scenario under the choices it is given (`once`), and what makes those choices: every one in turn
   (`explore`, `everyOrder`), drawn from a seed (`sample`), or handed in (`replay`).
 - `tests/orderings.spec.ts` holds every guarantee in the README (including `outside()`, clock parity, option/choice
-  validation, async checks, listener cleanup, and lazy `MessageChannel` ref/unref). `tests/worker.spec.ts` and
-  `tests/support/orderings-worker.ts` verify dedicated Web Workers across Chromium, Firefox, and WebKit.
+  validation, async checks, listener cleanup, and lazy `MessageChannel` lifecycle). `tests/node-exit.spec.ts` verifies
+  that idle Node child processes exit cleanly, and `tests/worker.spec.ts` with `tests/support/orderings-worker.ts`
+  verifies dedicated Web Workers across Chromium, Firefox, and WebKit.
 - `scripts/` is what CI and a release run: build determinism and size/cost checks (`package-check.mjs`), `publint` +
   `attw` (`package-lint.mjs`), consumer runtime + TS 5.7 ES2023 typecheck smoke (`package-smoke.mjs`), and the check
   that no workflow publishes to npm (`workflows-check.mjs`).
