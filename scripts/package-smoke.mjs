@@ -66,6 +66,7 @@ const scenario: Scenario = (schedule: Schedule) => {
   const compatible: ApackClockShape = clock
   const res: Resource = schedule.resource('state')
   schedule.later(lane, () => { schedule.read(res); schedule.write(res); void compatible.monotonic(); void compatible.now() }, taskOpts)
+  schedule.does({ label: 'user', tracked: true }, ['click', () => { schedule.write(res) }])
   return () => {}
 }
 const exploreOpts: ExploreOptions = { limit: 10, reduce: true }
@@ -75,6 +76,8 @@ const p2: Promise<Explored> = explore(scenario, exploreOpts)
 const p3: Promise<Explored> = sample(scenario, { seed: 1, runs: 5 })
 const p4: Promise<{ taken: readonly string[]; error?: unknown }> = replay(scenario, [0])
 const p5: Promise<AuditResult> = auditIndependence(scenario, auditOpts)
+const checkViolation = (r: AuditResult): readonly number[] | undefined => r.violation?.choices
+void checkViolation
 void p1
 void p2
 void p3

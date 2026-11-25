@@ -44,14 +44,14 @@ A scenario is a function of a `Schedule` that builds what it checks and returns 
 
 | | |
 |---|---|
-| `later(lane, run, { tracked? })` | Runs something after whatever is ahead of it in its lane. This is what the code under test is handed in place of a microtask or a timer: a `Lane` is `{ label }`, and one lane is one thing that keeps its order, such as one direction of a connection. Pass `{ tracked: true }` only from adapters that instrument all shared state with `read`/`write` |
-| `does(label, ...steps)` | A lane of the spec's own: things done one after another, such as what a user clicks (always globally conflicting) |
+| `later(lane, run, { tracked? })` | Runs something after whatever is ahead of it in its lane. This is what the code under test is handed in place of a microtask or a timer: a `Lane` is `{ label }`, and one lane is one thing that keeps its order, such as one direction of a connection. Pass `{ tracked: true }` only from adapters that instrument all shared state with `read`/`write` (give distinct dynamically-created lanes distinct labels for best reduction) |
+| `does(label, ...steps)` | A lane of the spec's own: things done one after another, such as what a user clicks. Pass a string for globally conflicting steps, or `{ label, tracked: true }` when every step goes through tracked state |
 | `work(label, value, { tracked? })` | Outside work in a lane of its own: a promise that resolves, with this value, when the schedule gets to it |
 | `breaks(label, error, { tracked? })` | The same, for work that fails |
 | `outside()` | Says something outside the schedule is under way, such as a message on a real socket. The run does not come to rest until what it returns is called; if never called, the run waits indefinitely |
 | `resource(label?)` | Allocates a run-scoped opaque `Resource` token for dynamic `read()`/`write()` conflict tracking under Optimal DPOR |
 | `read(resource)` / `write(resource)` | Records that the current task (or its settled microtasks) read or wrote `resource`. Concurrent reads commute; read/write and write/write conflict |
-| `clock` | The scenario's clock: `now()`, `monotonic()`, `after(ms, run, { tracked? })` and `sleep(ms, { signal?, tracked? })`. It moves only when the schedule runs one of its timers, in the order they are due, so no test waits on real time. Automatically records clock reads, advances, same-due ties, and timer cancellations |
+| `clock` | The scenario's clock: `now()`, `monotonic()`, `after(ms, run, { tracked? })` and `sleep(ms, { signal?, tracked? })`. It moves only when the schedule runs one of its timers, in the order they are due, so no test waits on real time. Automatically tracks clock reads, advances, same-due ties, timer preemption, and post-`sleep` cancellations (guard a shared `AbortController` with a `Resource` if a tracked task may abort it before `sleep()` is called) |
 
 What is in one lane keeps its order. Between lanes the schedule chooses, and that is all it may choose.
 
@@ -67,7 +67,7 @@ What is in one lane keeps its order. Between lanes the schedule chooses, and tha
 
 ## What holds
 
-- **Every order once — or once per equivalence class.** Only a real choice is counted, so two lanes of two steps are six orders and not sixteen. Untracked tasks conflict globally (sound by default); when adapters opt tasks into `{ tracked: true }` and record `read()`/`write()` on `schedule.resource()` tokens, Optimal DPOR (Abdulla et al., wakeup trees) explores one ordering per Mazurkiewicz equivalence class with zero wasted sleep-set-blocked runs.
+- **Every order once — or once per equivalence class.** Only a real choice is counted, so two lanes of two steps are six orders and not sixteen. Untracked tasks conflict globally (sound by default); when adapters opt tasks into `{ tracked: true }` and record `read()`/`write()` on `schedule.resource()` tokens, Optimal DPOR (Abdulla et al., wakeup trees) explores one representative ordering per Mazurkiewicz equivalence class (skipping sleep-set-blocked disabling branches cleanly).
 - **Promises settle between steps.** After each thing run, everything that can settle does before the next is
   chosen, so what a step's promise chain does belongs to that step. Post-condition checks may be synchronous or `async`.
 - **A run that never comes to rest is a failure**, after 10 000 steps, and not a hang. Pending `sleep()` abort

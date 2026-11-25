@@ -17,7 +17,7 @@ export interface TraceStep {
   readonly laneId: string
   readonly what: string
   readonly pushedBy: number
-  readonly cancelledTimer: boolean
+  readonly preemptedClock: boolean
   readonly access: StepAccess
   readonly readyLaneIds: readonly string[]
 }
@@ -108,64 +108,48 @@ export const insertWut = (root: WutNode, sleep: ReadonlyMap<string, StepAccess>,
 }
 
 /**
- * Computes all reversible immediate races (and timer-cancellation disabling points) along `steps` and returns
- * `{ depth, seq }` entries to insert into each depth's wakeup tree.
+ * Computes all reversible immediate races (and clock preemption/cancellation points) along `steps` in a single
+ * reverse-topological bitset sweep, returning `{ depth, seq }` entries to insert into each depth's wakeup tree.
  */
 export const findWakeups = (steps: readonly TraceStep[]): Array<{ readonly depth: number; readonly seq: readonly StepRef[] }> => {
   const n = steps.length
-  const hb: Uint8Array[] = Array.from({ length: n }, () => new Uint8Array(n))
-  // Stryker disable next-line EqualityOperator: at i === n, inner loop j = n + 1 < n runs 0 times.
-  for (let i = 0; i < n; i++) {
-    const a = steps[i]!
-    const row = hb[i]!
-    for (let j = i + 1; j < n; j++) {
-      const b = steps[j]!
-      if (a.laneId === b.laneId || b.pushedBy === i || conflicts(a.access, b.access)) row[j] = 1
-    }
-  }
-  // Stryker disable next-line EqualityOperator: at k === n, rowI[n] is undefined (falsy) so every i continues.
-  for (let k = 0; k < n; k++) {
-    const rowK = hb[k]!
-    // Stryker disable next-line EqualityOperator: at i === k, hb[k][k] is always 0 so it continues.
-    for (let i = 0; i < k; i++) {
-      const rowI = hb[i]!
-      if (!rowI[k]) continue
-      // Stryker disable next-line ArithmeticOperator,EqualityOperator: hb is strictly upper-triangular (j <= k is 0) and j === n reads undefined on Uint8Array.
-      for (let j = k + 1; j < n; j++) {
-        if (rowK[j]) rowI[j] = 1
-      }
-    }
-  }
-
+  const words = (n + 31) >>> 5
+  const hb: Uint32Array[] = Array.from({ length: n }, () => new Uint32Array(words))
   const found: Array<{ readonly depth: number; readonly seq: readonly StepRef[] }> = []
 
-  // Disabling: if step `i` cancelled a previously-pending timer, allow `clock` to run first.
+  // Disabling / preemption: if step `i` cancelled or preempted a previously-pending timer, allow `clock` to run first.
   for (let i = 0; i < n; i++) {
-    if (steps[i]!.cancelledTimer) {
+    if (steps[i]!.preemptedClock) {
       found.push({ depth: i, seq: [{ laneId: 'clock', access: GLOBAL_ACCESS }] })
     }
   }
 
-  // Reversible immediate races (i, j): dep(i, j), different lanes, not directly created by i, no intermediate hb edge.
-  for (let j = 1; j < n; j++) {
-    const stepJ = steps[j]!
-    for (let i = j - 1; i >= 0; i--) {
-      const stepI = steps[i]!
-      if (stepI.laneId === stepJ.laneId || stepJ.pushedBy === i || !conflicts(stepI.access, stepJ.access)) continue
-      const rowI = hb[i]!
-      let ordered = false
-      // Stryker disable next-line ArithmeticOperator,EqualityOperator: hb[i][k] is 0 for k <= i (strictly upper-triangular) and hb[j][j] is 0 at k === j.
-      for (let k = i + 1; k < j; k++) {
-        if (rowI[k] && hb[k]![j]) { ordered = true; break }
+  // Reverse topological sweep: when processing `i`, every `hb[j]` for `j > i` is already transitively closed.
+  // Before visiting `j`, bit `j` is set in `hb[i]` iff some intermediate `k` (`i < k < j`) satisfies `i hb k hb j`.
+  // Stryker disable next-line ArithmeticOperator: for i >= n - 1, inner loop j = i + 1 < n runs 0 times.
+  for (let i = n - 1; i >= 0; i--) {
+    const stepI = steps[i]!
+    const rowI = hb[i]!
+    for (let j = i + 1; j < n; j++) {
+      const stepJ = steps[j]!
+      const sameLane = stepI.laneId === stepJ.laneId
+      const created = stepJ.pushedBy === i
+      if (!sameLane && !created && !conflicts(stepI.access, stepJ.access)) continue
+      if ((rowI[j >>> 5]! & (1 << (j & 31))) !== 0) continue
+      if (!sameLane && !created) {
+        const seq: StepRef[] = []
+        for (let k = i + 1; k < j; k++) {
+          if ((rowI[k >>> 5]! & (1 << (k & 31))) === 0) {
+            seq.push({ laneId: steps[k]!.laneId, access: steps[k]!.access })
+          }
+        }
+        seq.push({ laneId: stepJ.laneId, access: stepJ.access })
+        found.push({ depth: i, seq })
       }
-      if (ordered) continue
-      const seq: StepRef[] = []
-      // Stryker disable next-line EqualityOperator: at k === j, hb[i][j] is always 1 (since dep(i, j) holds).
-      for (let k = i + 1; k < j; k++) {
-        if (!rowI[k]) seq.push({ laneId: steps[k]!.laneId, access: steps[k]!.access })
-      }
-      seq.push({ laneId: stepJ.laneId, access: stepJ.access })
-      found.push({ depth: i, seq })
+      rowI[j >>> 5]! |= 1 << (j & 31)
+      const rowJ = hb[j]!
+      // Stryker disable next-line EqualityOperator: at w === words, rowJ[words] is undefined and Uint32Array ignores out-of-bounds writes.
+      for (let w = 0; w < words; w++) rowI[w]! |= rowJ[w]!
     }
   }
 

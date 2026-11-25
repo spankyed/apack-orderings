@@ -68,16 +68,25 @@ export interface Clock {
   after(ms: number, run: () => void, options?: TaskOptions): () => void
   /**
    * Resolves `ms` from now, when the schedule gets to it. Rejects with `RangeError` for a non-finite `ms` or
-   * overflowing deadline, or with `options.signal.reason` if aborted.
+   * overflowing deadline, or with `options.signal.reason` if aborted. Aborts after `sleep()` is called are tracked
+   * automatically; if a tracked task can abort the `AbortController` before `sleep()` is even called, guard that
+   * controller with a `Resource`.
    */
   sleep(ms: number, options?: { readonly signal?: AbortSignal; readonly tracked?: boolean }): Promise<void>
 }
 
 export interface Schedule {
-  /** Runs something after whatever is ahead of it in its lane. What a system or a link is given as `later`. */
+  /**
+   * Runs something after whatever is ahead of it in its lane. What a system or a link is given as `later`.
+   * Dynamically created lanes (first pushed inside a step rather than setup) fall back to label-based push conflict
+   * tracking, so distinct dynamic lanes should use distinct labels for best reduction.
+   */
   later(lane: Lane, run: () => void, options?: TaskOptions): void
-  /** A lane of the spec's own: things done one after another, such as what a user clicks. */
-  does(label: string, ...steps: ReadonlyArray<readonly [what: string, run: () => void]>): void
+  /**
+   * A lane of the spec's own: things done one after another, such as what a user clicks. Pass a string label for
+   * globally conflicting steps (default), or `{ label, tracked: true }` when every action goes through tracked state.
+   */
+  does(label: string | (Lane & TaskOptions), ...steps: ReadonlyArray<readonly [what: string, run: () => void]>): void
   /** Outside work, in a lane of its own: it is done, with this value, when the schedule gets to it. */
   work<T>(label: string, value: T, options?: TaskOptions): Promise<T>
   /** The same, for work that fails. */
@@ -140,6 +149,9 @@ export interface AuditResult {
   readonly checked: number
   /** First detected unsound independence violation, if any. */
   readonly violation?: {
+    /** Full choices of the original trace, directly passable to `replay()`. */
+    readonly choices: readonly number[]
+    /** Choices leading up to the swapped pair. */
     readonly prefix: readonly number[]
     readonly first: string
     readonly second: string
@@ -232,7 +244,7 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
     readonly nextSpawn: () => number
     readonly nextResource: () => number
     readonly nextTimer: () => number
-    cancelledTimer: boolean
+    preemptedClock: boolean
   } | undefined
 
   const recordReadId = (id: string): void => { activeStep?.access.reads.add(id) }
@@ -293,6 +305,10 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
     }
     let at = timers.length
     while (at > 0 && timers[at - 1]!.due > due) at--
+    const step = activeStep
+    if (step && timers.slice(at).some((existing) => existing.pushedBy !== step.index)) {
+      step.preemptedClock = true
+    }
     timers.splice(at, 0, timer)
     lanes.set('clock', timers)
     wake()
@@ -302,7 +318,7 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
         recordWriteId(timerId)
         const index = timers.indexOf(timer)
         if (index >= 0) {
-          if (activeStep && creator !== activeStep.index) activeStep.cancelledTimer = true
+          if (activeStep && creator !== activeStep.index) activeStep.preemptedClock = true
           timers.splice(index, 1)
         }
       },
@@ -361,7 +377,11 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
     read: (resource) => { recordReadId(resolveResource(resource)) },
     write: (resource) => { recordWriteId(resolveResource(resource)) },
     later: (lane, run, options) => into(lane, lane.label, options?.tracked === true, run, true),
-    does: (label, ...steps) => { const lane = {}; for (const [what, run] of steps) into(lane, `${label}: ${what}`, false, run) },
+    does: (head, ...steps) => {
+      const [label, tracked] = typeof head === 'string' ? [head, false] : [head.label, head.tracked === true]
+      const lane = {}
+      for (const [what, run] of steps) into(lane, `${label}: ${what}`, tracked, run)
+    },
     work: (label, value, options) => new Promise((resolve) => { into({}, label, options?.tracked === true, () => resolve(value)) }),
     breaks: (label, error, options) => new Promise((_, reject) => { into({}, label, options?.tracked === true, () => reject(error)) }),
     outside: () => {
@@ -418,7 +438,7 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
         nextSpawn: makeCounter(),
         nextResource: makeCounter(),
         nextTimer: makeCounter(),
-        cancelledTimer: false,
+        preemptedClock: false,
       }
       made.taken.push(task.what)
       try {
@@ -431,7 +451,7 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
           laneId: finished.laneId,
           what: task.what,
           pushedBy: task.pushedBy,
-          cancelledTimer: finished.cancelledTimer,
+          preemptedClock: finished.preemptedClock,
           access: finished.access,
           readyLaneIds,
         })
@@ -661,15 +681,19 @@ export async function replay(scenario: Scenario, choices: readonly number[]): Pr
   return 'error' in made ? { taken: made.taken, error: made.error } : { taken: made.taken }
 }
 
-const sameLaneSet = (a: readonly string[] | undefined, b: readonly string[] | undefined): boolean => {
-  if (!a || !b) return a === b
-  return a.length === b.length && a.every((id) => b.includes(id))
-}
+const sameLaneSet = (a: readonly string[], b: readonly string[] | undefined): boolean =>
+  b !== undefined && a.length === b.length && a.every((id) => b.includes(id))
+
+const sameSet = (a: ReadonlySet<string>, b: ReadonlySet<string>): boolean =>
+  a.size === b.size && [...a].every((item) => b.has(item))
+
+const sameAccess = (a: StepAccess, b: StepAccess | undefined): boolean =>
+  b !== undefined && sameSet(a.reads, b.reads) && sameSet(a.writes, b.writes)
 
 /**
  * Audits that tasks marked `{ tracked: true }` truly commute whenever their recorded `read()`/`write()` accesses are
- * disjoint. Samples traces, swaps adjacent supposedly-independent steps, and checks that enabling, ready lane sets,
- * and pass/fail outcomes remain identical.
+ * disjoint. Samples traces, swaps adjacent supposedly-independent steps, and checks that enabling, downstream ready
+ * lane sets, recorded resource accesses, and pass/fail outcomes remain identical.
  */
 export async function auditIndependence(scenario: Scenario, options: AuditOptions = {}): Promise<AuditResult> {
   const seed = options.seed ?? 1
@@ -703,32 +727,22 @@ export async function auditIndependence(scenario: Scenario, options: AuditOption
         return index
       }, true)
       const prefixChoices = orig.choices.slice(0, steps.slice(0, i).filter((s) => s.readyLaneIds.length > 1).length)
-      if (swapProblem) {
-        return { runs: run, checked, violation: { prefix: prefixChoices, first: a.what, second: b.what, reason: swapProblem } }
-      }
-      if (!sameLaneSet(steps[i + 2]?.readyLaneIds, swapped.steps[i + 2]?.readyLaneIds)) {
-        return {
-          runs: run,
-          checked,
-          violation: {
-            prefix: prefixChoices,
-            first: a.what,
-            second: b.what,
-            reason: `ready lanes diverged after swapping "${a.what}" and "${b.what}"`,
-          },
-        }
-      }
+      const fail = (reason: string): AuditResult => ({
+        runs: run,
+        checked,
+        violation: { choices: orig.choices, prefix: prefixChoices, first: a.what, second: b.what, reason },
+      })
+      if (swapProblem) return fail(swapProblem)
       if (('error' in orig) !== ('error' in swapped)) {
-        return {
-          runs: run,
-          checked,
-          violation: {
-            prefix: prefixChoices,
-            first: a.what,
-            second: b.what,
-            reason: `scenario outcome differed after swapping "${a.what}" and "${b.what}"`,
-          },
+        return fail(`scenario outcome differed after swapping "${a.what}" and "${b.what}"`)
+      }
+      for (let k = i + 2; k < steps.length; k++) {
+        if (!sameLaneSet(steps[k]!.readyLaneIds, swapped.steps[k]?.readyLaneIds)) {
+          return fail(`ready lanes diverged after swapping "${a.what}" and "${b.what}"`)
         }
+      }
+      if (!sameAccess(a.access, swapped.steps[i + 1]?.access) || !sameAccess(b.access, swapped.steps[i]!.access)) {
+        return fail(`resource accesses diverged after swapping "${a.what}" and "${b.what}"`)
       }
       if (checked >= swaps) return { runs: run, checked }
     }
