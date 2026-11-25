@@ -23,7 +23,7 @@ try {
   run(['install', '--no-audit', '--no-fund', '--no-package-lock', tarball], consumer)
   fs.writeFileSync(path.join(consumer, 'entries.mjs'), `
 import * as orderings from '@apackdev/orderings'
-for (const name of ['everyOrder', 'explore', 'replay', 'sample']) if (typeof orderings[name] !== 'function') throw new Error('@apackdev/orderings has no ' + name)
+for (const name of ['auditIndependence', 'everyOrder', 'explore', 'replay', 'sample']) if (typeof orderings[name] !== 'function') throw new Error('@apackdev/orderings has no ' + name)
 const count = await orderings.everyOrder((schedule) => {
   let woke = 0
   schedule.clock.after(10, () => { woke = schedule.clock.monotonic() })
@@ -34,15 +34,21 @@ if (count !== 1) throw new Error('expected 1 ordering, got ' + count)
   execFileSync(process.execPath, ['entries.mjs'], { cwd: consumer, stdio: 'inherit' })
   fs.writeFileSync(path.join(consumer, 'consumer.ts'), `
 import {
+  auditIndependence,
   everyOrder,
   explore,
   replay,
   sample,
+  type AuditOptions,
+  type AuditResult,
   type Clock,
   type Explored,
+  type ExploreOptions,
   type Lane,
+  type Resource,
   type Scenario,
   type Schedule,
+  type TaskOptions,
 } from '@apackdev/orderings'
 
 // Verify structural compatibility with @apackdev/clock's 4-method Clock interface.
@@ -54,20 +60,29 @@ interface ApackClockShape {
 }
 
 const lane: Lane = { label: 'test' }
+const taskOpts: TaskOptions = { tracked: true }
 const scenario: Scenario = (schedule: Schedule) => {
   const clock: Clock = schedule.clock
   const compatible: ApackClockShape = clock
-  schedule.later(lane, () => { void compatible.monotonic(); void compatible.now() })
+  const res: Resource = schedule.resource('state')
+  schedule.later(lane, () => { schedule.read(res); schedule.write(res); void compatible.monotonic(); void compatible.now() }, taskOpts)
+  schedule.does({ label: 'user', tracked: true }, ['click', () => { schedule.write(res) }])
   return () => {}
 }
-const p1: Promise<number> = everyOrder(scenario, { limit: 10 })
-const p2: Promise<Explored> = explore(scenario)
+const exploreOpts: ExploreOptions = { limit: 10, reduce: true }
+const auditOpts: AuditOptions = { seed: 1, runs: 5, swaps: 10 }
+const p1: Promise<number> = everyOrder(scenario, exploreOpts)
+const p2: Promise<Explored> = explore(scenario, exploreOpts)
 const p3: Promise<Explored> = sample(scenario, { seed: 1, runs: 5 })
 const p4: Promise<{ taken: readonly string[]; error?: unknown }> = replay(scenario, [0])
+const p5: Promise<AuditResult> = auditIndependence(scenario, auditOpts)
+const checkViolation = (r: AuditResult): readonly number[] | undefined => r.violation?.choices
+void checkViolation
 void p1
 void p2
 void p3
 void p4
+void p5
 `)
   const tsc57 = path.join(root, 'node_modules', 'typescript-5.7', 'bin', 'tsc')
   // 1. Browser ES2023+DOM consumer (`types: []`, no `ESNext.Disposable`, `skipLibCheck: false`): proves dist/index.d.ts
