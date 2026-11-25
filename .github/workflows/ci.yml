@@ -7,6 +7,9 @@ on:
   push:
     branches: [master]
   pull_request:
+  schedule:
+    # Nightly deep differential fuzzing of Optimal DPOR against unreduced exploration.
+    - cron: '0 6 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -15,6 +18,7 @@ concurrency:
 
 jobs:
   suite:
+    if: github.event_name != 'schedule'
     name: suite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -44,6 +48,7 @@ jobs:
   # The schedule's specs in real browser engines and dedicated Web Workers: Chromium, Firefox, and WebKit via vitest's
   # browser mode and Playwright. Runs on macos-15 so all three engines install cleanly without Ubuntu's WebKit apt stack.
   browser:
+    if: github.event_name != 'schedule'
     name: browser (chromium, firefox, webkit)
     runs-on: macos-15
     steps:
@@ -66,6 +71,7 @@ jobs:
 
   # Every mutant of the source, run against the specs: one that survives fails.
   mutants:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -76,10 +82,47 @@ jobs:
       - run: npm ci
       - run: npm run mutants
 
-  # The one check a release waits on: every job above passed.
-  ci-pass:
-    if: always()
-    needs: [suite, browser, mutants]
+  # Differential oracle comparing wakeup-tree DPOR against unreduced exploration across randomized nested programs.
+  fuzz:
     runs-on: ubuntu-24.04
     steps:
-      - run: test "${{ needs.suite.result }}" = "success" -a "${{ needs.browser.result }}" = "success" -a "${{ needs.mutants.result }}" = "success"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Run differential fuzzer
+        env:
+          FUZZ_PROGRAMS: ${{ github.event_name == 'schedule' && '2100' || '600' }}
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            export FUZZ_SEED="$(date -u +%Y%m%d)"
+          fi
+          npm run fuzz
+
+  # Report nightly fuzz failures (and close on recovery) via a single issue on master.
+  nightly-status:
+    if: ${{ !cancelled() && github.event_name == 'schedule' && github.ref == 'refs/heads/master' }}
+    needs: [fuzz]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash .github/scripts/master-status.sh ${{ needs.fuzz.result == 'success' && 'passed' || 'failed' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          WORKFLOW: CI (nightly fuzz)
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+
+  # The one check a release waits on: every job above passed.
+  ci-pass:
+    if: always() && github.event_name != 'schedule'
+    needs: [suite, browser, mutants, fuzz]
+    runs-on: ubuntu-24.04
+    steps:
+      - run: test "${{ needs.suite.result }}" = "success" -a "${{ needs.browser.result }}" = "success" -a "${{ needs.mutants.result }}" = "success" -a "${{ needs.fuzz.result }}" = "success"

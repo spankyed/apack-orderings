@@ -29,6 +29,12 @@ what to know before changing it.
   `erasableSyntaxOnly: true` and Node `>=24.12.0`.
 - **Used by apack-link's and apack-state's test kits.** A change to what `Schedule` offers or to how orders are
   counted moves both: change it here, release, and move their pins.
+- **Timers are globally conflicting under DPOR.** All timers share one priority-queue `'clock'` lane whose head task
+  can be preempted or cancelled by another lane, which lies outside Abdulla et al. (2017)'s non-disabling / fixed-lane
+  assumptions. Timer scheduling, cancellation, and firing therefore set `global = true`, and `preemptedClock` adds the
+  single O(1) `['clock']` disabling/preemption wakeup in `findWakeups()`. Do not remove `preemptedClock` or relax
+  timer global conflict without following [docs/deferred/timer-dpor.md](docs/deferred/timer-dpor.md) and proving
+  soundness against the nested differential fuzzer (`npm run fuzz`).
 - **Every mutant is caught.** A line whose change no spec notices is a line nothing holds: add the case, or where the
   change is mathematically equivalent, explain why on that line.
 - **A spec says what holds, not how.**
@@ -40,6 +46,7 @@ npm run typecheck
 npm run typecheck:floor
 npm test
 npm run test:browser
+npm run fuzz
 npm run mutants
 npm run build
 npm run package:check

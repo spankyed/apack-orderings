@@ -38,6 +38,7 @@
     "package:lint": "node scripts/package-lint.mjs",
     "package:smoke": "node scripts/package-smoke.mjs",
     "workflows:check": "node scripts/workflows-check.mjs",
+    "fuzz": "node scripts/fuzz.mjs",
     "mutants": "stryker run"
   },
   "devDependencies": {

@@ -107,26 +107,24 @@ export const insertWut = (root: WutNode, sleep: ReadonlyMap<string, StepAccess>,
   }
 }
 
+/** A wakeup sequence to insert into the wakeup tree at `depth`. */
+export interface Wakeup {
+  readonly depth: number
+  readonly seq: readonly StepRef[]
+}
+
 /**
- * Computes all reversible immediate races (and clock preemption/cancellation points) along `steps` in a single
- * reverse-topological bitset sweep, returning `{ depth, seq }` entries to insert into each depth's wakeup tree.
+ * Computes all reversible immediate races (and clock cancellation/preemption points) along `steps` in a single
+ * reverse-topological bitset sweep, returning `Wakeup` entries to insert into each depth's wakeup tree.
  */
-export const findWakeups = (steps: readonly TraceStep[]): Array<{ readonly depth: number; readonly seq: readonly StepRef[] }> => {
+export const findWakeups = (steps: readonly TraceStep[]): Wakeup[] => {
   const n = steps.length
   const words = (n + 31) >>> 5
   const hb: Uint32Array[] = Array.from({ length: n }, () => new Uint32Array(words))
-  const found: Array<{ readonly depth: number; readonly seq: readonly StepRef[] }> = []
-
-  // Disabling / preemption: if step `i` cancelled or preempted a previously-pending timer, allow `clock` to run first.
-  for (let i = 0; i < n; i++) {
-    if (steps[i]!.preemptedClock) {
-      found.push({ depth: i, seq: [{ laneId: 'clock', access: GLOBAL_ACCESS }] })
-    }
-  }
+  const found: Wakeup[] = []
 
   // Reverse topological sweep: when processing `i`, every `hb[j]` for `j > i` is already transitively closed.
   // Before visiting `j`, bit `j` is set in `hb[i]` iff some intermediate `k` (`i < k < j`) satisfies `i hb k hb j`.
-  // Stryker disable next-line ArithmeticOperator: for i >= n - 1, inner loop j = i + 1 < n runs 0 times.
   for (let i = n - 1; i >= 0; i--) {
     const stepI = steps[i]!
     const rowI = hb[i]!
@@ -150,6 +148,11 @@ export const findWakeups = (steps: readonly TraceStep[]): Array<{ readonly depth
       const rowJ = hb[j]!
       // Stryker disable next-line EqualityOperator: at w === words, rowJ[words] is undefined and Uint32Array ignores out-of-bounds writes.
       for (let w = 0; w < words; w++) rowI[w]! |= rowJ[w]!
+    }
+    // Disabling / preemption: timer operations are globally conflicting, so `clock` can never persist in `sleep`
+    // across a step; emitting a single `['clock']` wakeup suffices when `i` cancels or preempts a pending timer.
+    if (stepI.preemptedClock) {
+      found.push({ depth: i, seq: [{ laneId: 'clock', access: GLOBAL_ACCESS }] })
     }
   }
 

@@ -40,6 +40,8 @@ the count is 1
 
 ## What a scenario is given
 
+> **The soundness trade:** Untracked scenarios run plain unreduced search by construction — DPOR never runs unless a task opts into `{ tracked: true }`. Once a scenario opts tasks into `{ tracked: true }`, soundness depends on every shared mutable read and write being reported with `read()`/`write()`; a missed declaration silently skips real orderings. `auditIndependence()` is a sampled probe that catches most omissions loudly, not a formal proof.
+
 A scenario is a function of a `Schedule` that builds what it checks and returns what must hold at rest.
 
 | | |
@@ -49,9 +51,9 @@ A scenario is a function of a `Schedule` that builds what it checks and returns 
 | `work(label, value, { tracked? })` | Outside work in a lane of its own: a promise that resolves, with this value, when the schedule gets to it |
 | `breaks(label, error, { tracked? })` | The same, for work that fails |
 | `outside()` | Says something outside the schedule is under way, such as a message on a real socket. The run does not come to rest until what it returns is called; if never called, the run waits indefinitely |
-| `resource(label?)` | Allocates a run-scoped opaque `Resource` token for dynamic `read()`/`write()` conflict tracking under Optimal DPOR |
+| `resource(label?)` | Allocates a run-scoped opaque `Resource` token for dynamic `read()`/`write()` conflict tracking under wakeup-tree DPOR |
 | `read(resource)` / `write(resource)` | Records that the current task (or its settled microtasks) read or wrote `resource`. Concurrent reads commute; read/write and write/write conflict |
-| `clock` | The scenario's clock: `now()`, `monotonic()`, `after(ms, run, { tracked? })` and `sleep(ms, { signal?, tracked? })`. It moves only when the schedule runs one of its timers, in the order they are due, so no test waits on real time. Automatically tracks clock reads, advances, same-due ties, timer preemption, and post-`sleep` cancellations (guard a shared `AbortController` with a `Resource` if a tracked task may abort it before `sleep()` is called) |
+| `clock` | The scenario's clock: `now()`, `monotonic()`, `after(ms, run, { tracked? })` and `sleep(ms, { signal?, tracked? })`. It moves only when the schedule runs one of its timers, in the order they are due, so no test waits on real time. Timer scheduling, cancellation, and firing are currently globally conflicting under reduction for soundness (guard a shared `AbortController` with a `Resource` if a tracked task may abort it before `sleep()` is called) |
 
 What is in one lane keeps its order. Between lanes the schedule chooses, and that is all it may choose.
 
@@ -59,7 +61,7 @@ What is in one lane keeps its order. Between lanes the schedule chooses, and tha
 
 | | |
 |---|---|
-| `everyOrder(scenario, { limit?, reduce? })` | Runs every order (or every equivalence class under Optimal DPOR when tasks opt into `{ tracked: true }` and `reduce !== false`) and throws for the first that fails, naming each step of it and the choices to replay it with. Returns how many orders were run. Throws past `limit` (50 000 unless given; positive safe integer or `Infinity`) |
+| `everyOrder(scenario, { limit?, reduce? })` | Runs every order (or reduced equivalence classes via wakeup-tree DPOR when tasks opt into `{ tracked: true }` and `reduce !== false`) and throws for the first that fails, naming each step of it and the choices to replay it with. Returns how many orders were run. Throws past `limit` (50 000 unless given; positive safe integer or `Infinity`) |
 | `explore(scenario, { limit?, reduce? })` | The same without throwing: `{ orderings, complete, reduced?, failure? }` |
 | `sample(scenario, { seed, runs })` | Orders drawn at random from a 32-bit unsigned integer `seed` for `runs` (positive safe integer), the same ones for the same seed, for a scenario with too many to run them all |
 | `replay(scenario, choices)` | One order: the choices a failure came back with. Throws `RangeError` if any choice is negative, non-integer, or out of range, or if the recording is stale (ran out of choices or left unused trailing choices) |
@@ -67,7 +69,7 @@ What is in one lane keeps its order. Between lanes the schedule chooses, and tha
 
 ## What holds
 
-- **Every order once — or once per equivalence class.** Only a real choice is counted, so two lanes of two steps are six orders and not sixteen. Untracked tasks conflict globally (sound by default); when adapters opt tasks into `{ tracked: true }` and record `read()`/`write()` on `schedule.resource()` tokens, Optimal DPOR (Abdulla et al., wakeup trees) explores one representative ordering per Mazurkiewicz equivalence class (skipping sleep-set-blocked disabling branches cleanly).
+- **Every order once — or reduced equivalence classes under DPOR.** Only a real choice is counted, so two lanes of two steps are six orders and not sixteen. Untracked scenarios fall back directly to plain unreduced search (sound by construction); when adapters opt tasks into `{ tracked: true }` and record `read()`/`write()` on `schedule.resource()` tokens, wakeup-tree DPOR (Abdulla et al., 2017) explores equivalence classes for non-timer lanes while keeping timer scheduling, cancellation, and firing globally conflicting for soundness.
 - **Promises settle between steps.** After each thing run, everything that can settle does before the next is
   chosen, so what a step's promise chain does belongs to that step. Post-condition checks may be synchronous or `async`.
 - **A run that never comes to rest is a failure**, after 10 000 steps, and not a hang. Pending `sleep()` abort

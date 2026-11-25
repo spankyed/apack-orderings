@@ -14,7 +14,6 @@
 import {
   conflicts,
   findWakeups,
-  GLOBAL_ACCESS,
   insertWut,
   makeAccess,
   makeWutNode,
@@ -64,13 +63,14 @@ export interface Clock {
   /**
    * Runs `run` once, `ms` from now, when the schedule gets to it. Returns an idempotent cancel function.
    * Negative finite waits are treated as `0`. Throws `RangeError` for a non-finite `ms` or overflowing deadline.
+   * Timer scheduling, cancellation, and firing are currently globally conflicting under reduction for soundness.
    */
   after(ms: number, run: () => void, options?: TaskOptions): () => void
   /**
    * Resolves `ms` from now, when the schedule gets to it. Rejects with `RangeError` for a non-finite `ms` or
-   * overflowing deadline, or with `options.signal.reason` if aborted. Aborts after `sleep()` is called are tracked
-   * automatically; if a tracked task can abort the `AbortController` before `sleep()` is even called, guard that
-   * controller with a `Resource`.
+   * overflowing deadline, or with `options.signal.reason` if aborted. Timer scheduling, cancellation, and firing are
+   * currently globally conflicting under reduction for soundness; if a tracked task can abort the `AbortController`
+   * before `sleep()` is called, guard that controller with a `Resource`.
    */
   sleep(ms: number, options?: { readonly signal?: AbortSignal; readonly tracked?: boolean }): Promise<void>
 }
@@ -159,14 +159,18 @@ export interface AuditResult {
   }
 }
 
-/** How one run went: choices, ready counts, executed trace steps, and any error thrown. */
+/** How one run went: choices, ready counts, executed trace steps, whether any task was tracked, and any error thrown. */
 interface Run {
   choices: number[]
   counts: number[]
   taken: string[]
   steps: TraceStep[]
+  anyTracked: boolean
   error?: unknown
 }
+
+/** Internal control-flow sentinel thrown to abort a sleep-set-blocked branch cleanly inside `exploreOptimal`. */
+const SLEEP_BLOCKED = Symbol('sleepBlocked')
 
 /**
  * Lets every promise that can settle do so: a message is delivered on a turn of the event loop, which comes after all
@@ -233,7 +237,6 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
 
   const nextSetupSpawn = makeCounter()
   const nextSetupResource = makeCounter()
-  const nextSetupTimer = makeCounter()
   let away = 0
   let landed: (() => void) | undefined
   let activeStep: {
@@ -243,12 +246,12 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
     readonly access: StepAccess
     readonly nextSpawn: () => number
     readonly nextResource: () => number
-    readonly nextTimer: () => number
     preemptedClock: boolean
   } | undefined
 
   const recordReadId = (id: string): void => { activeStep?.access.reads.add(id) }
   const recordWriteId = (id: string): void => { activeStep?.access.writes.add(id) }
+  const markGlobal = (): void => { if (activeStep) activeStep.access.global = true }
   const resolveResource = (resource: Resource): string => {
     const id = resourceIds.get(resource)
     if (!id) throw new Error('Resource does not belong to this schedule run; allocate it with schedule.resource() inside the scenario')
@@ -279,85 +282,67 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
   }
 
   // The clock's timers: a lane kept in the order they are due, and of two due at once, the one set first.
+  // Timer scheduling, cancellation, and firing are marked globally conflicting so the shared priority-queue `clock`
+  // lane cannot violate wakeup-tree DPOR's non-disabling / stable-identity assumptions.
   let time = 0
   const timers: Array<Task & { readonly due: number }> = []
   const sleepCleanups = new Set<() => void>()
-  const scheduleTimer = (ms: number, run: () => void, options?: TaskOptions): { readonly cancel: () => void; readonly timerId: string } => {
+  const scheduleTimer = (ms: number, run: () => void): (() => void) => {
     assertFiniteWait(ms)
-    recordReadId('sys:clock')
     const due = time + Math.max(0, ms)
     if (!Number.isFinite(due)) throw new RangeError(`A clock wait of ${String(ms)} ms overflows the scenario clock`)
-    recordWriteId(`due:${due}`)
-    const timerId = activeStep
-      ? `timer:${activeStep.laneId}.${activeStep.laneSeq}:${activeStep.nextTimer()}`
-      : `timer:0:${nextSetupTimer()}`
+    markGlobal()
     const creator = pushedByNow()
     const timer: Task & { readonly due: number } = {
       what: `the clock: ${due} ms`,
-      tracked: options?.tracked === true,
+      tracked: false,
       pushedBy: creator,
       due,
       run: () => {
-        recordWriteId(timerId)
-        if (due > time) { time = due; recordWriteId('sys:clock') }
+        time = due
         run()
       },
     }
     let at = timers.length
     while (at > 0 && timers[at - 1]!.due > due) at--
     const step = activeStep
-    if (step && timers.slice(at).some((existing) => existing.pushedBy !== step.index)) {
+    if (step && timers.some((existing) => existing.pushedBy !== step.index)) {
       step.preemptedClock = true
     }
     timers.splice(at, 0, timer)
     lanes.set('clock', timers)
     wake()
-    return {
-      timerId,
-      cancel: () => {
-        recordWriteId(timerId)
-        const index = timers.indexOf(timer)
-        if (index >= 0) {
-          if (activeStep && creator !== activeStep.index) activeStep.preemptedClock = true
-          timers.splice(index, 1)
-        }
-      },
+    return () => {
+      markGlobal()
+      const index = timers.indexOf(timer)
+      if (index >= 0) {
+        if (activeStep && creator !== activeStep.index) activeStep.preemptedClock = true
+        timers.splice(index, 1)
+      }
     }
   }
   const clock: Clock = Object.freeze<Clock>({
-    now: () => { recordReadId('sys:clock'); return time },
-    monotonic: () => { recordReadId('sys:clock'); return time },
-    after: (ms, run, options) => scheduleTimer(ms, run, options).cancel,
+    now: () => time,
+    monotonic: () => time,
+    after: (ms, run) => scheduleTimer(ms, run),
     sleep: (ms, options) => new Promise((resolve, reject) => {
       assertFiniteWait(ms)
       const signal = options?.signal
       if (signal?.aborted) { reject(signal.reason); return }
       let cancel!: () => void
-      let timerId!: string
       const cleanup = (): void => {
         sleepCleanups.delete(cleanup)
         signal!.removeEventListener('abort', onAbort)
-        signal!.removeEventListener('abort', onLateAbort)
-      }
-      const onLateAbort = (): void => {
-        cleanup()
-        recordWriteId(timerId)
       }
       const onAbort = (): void => {
         cleanup()
         cancel()
         reject(signal!.reason)
       }
-      const scheduled = scheduleTimer(ms, () => {
-        if (signal) {
-          signal.removeEventListener('abort', onAbort)
-          // Keep a passive listener for the rest of this run so a later abort records the race against firing.
-          signal.addEventListener('abort', onLateAbort)
-        }
+      cancel = scheduleTimer(ms, () => {
+        if (signal) cleanup()
         resolve()
-      }, options?.tracked ? { tracked: true } : undefined)
-      cancel = scheduled.cancel
-      timerId = scheduled.timerId
+      })
       if (signal) {
         sleepCleanups.add(cleanup)
         signal.addEventListener('abort', onAbort)
@@ -398,7 +383,7 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
     },
   })
 
-  const made: Run = { choices: [], counts: [], taken: [], steps: [] }
+  const made: Run = { choices: [], counts: [], taken: [], steps: [], anyTracked: false }
   if (++activeRuns === 1) { ensureTurn(); hold!.ref?.() }
   try {
     const check = scenario(schedule)
@@ -429,6 +414,7 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
       // Stryker disable next-line ArithmeticOperator: counting up vs down yields an isomorphic bijection of per-lane sequence numbers.
       laneSeqs.set(picked.laneId, laneSeq + 1)
       const access = makeAccess(task.tracked)
+      if (task.tracked) made.anyTracked = true
       const readyLaneIds = ready.map((entry) => entry.laneId)
       activeStep = {
         index: stepDepth,
@@ -437,7 +423,6 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
         access,
         nextSpawn: makeCounter(),
         nextResource: makeCounter(),
-        nextTimer: makeCounter(),
         preemptedClock: false,
       }
       made.taken.push(task.what)
@@ -477,23 +462,23 @@ export interface Explored {
   readonly failure?: { readonly choices: readonly number[]; readonly taken: readonly string[]; readonly error: unknown }
 }
 
-/** Unreduced exhaustive prefix search (used when `reduce: false`). */
-async function exploreUnreduced(scenario: Scenario, limit: number): Promise<Explored> {
-  let prefix: number[] = []
+/** Unreduced exhaustive prefix search (used when `reduce: false` or when no task opted into `{ tracked: true }`). */
+async function exploreUnreduced(scenario: Scenario, limit: number, first: Run): Promise<Explored> {
+  let made = first
   for (let orderings = 1; ; orderings++) {
-    const made = await once(scenario, (_, depth) => prefix[depth] ?? 0)
     if ('error' in made) return { orderings, complete: false, failure: { choices: made.choices, taken: made.taken, error: made.error } }
     let last = made.choices.length - 1
     // Stryker disable next-line ConditionalExpression: at last === -1, undefined + 1 is NaN and NaN >= undefined is false.
     while (last >= 0 && made.choices[last]! + 1 >= made.counts[last]!) last--
     if (last < 0) return { orderings, complete: true }
     if (orderings >= limit) return { orderings, complete: false }
-    prefix = [...made.choices.slice(0, last), made.choices[last]! + 1]
+    const prefix = [...made.choices.slice(0, last), made.choices[last]! + 1]
+    made = await once(scenario, (_, depth) => prefix[depth] ?? 0)
   }
 }
 
 /** Optimal DPOR exploration with wakeup trees (Abdulla et al., JACM 2017, Algorithm 2). */
-async function exploreOptimal(scenario: Scenario, limit: number): Promise<Explored> {
+async function exploreOptimal(scenario: Scenario, limit: number, first: Run): Promise<Explored> {
   interface Frame {
     readonly sleep: Map<string, StepAccess>
     readonly wut: WutNode
@@ -501,11 +486,45 @@ async function exploreOptimal(scenario: Scenario, limit: number): Promise<Explor
     exploredCount: number
   }
 
-  let orderings = 0
+  let orderings = 1
   let wasReduced = false
   let failure: Explored['failure']
   let hitLimit = false
   const stack: Frame[] = []
+
+  const finishBranch = async (
+    steps: readonly TraceStep[],
+    baseDepth: number,
+    observedParent: StepAccess | undefined,
+  ): Promise<StepAccess | undefined> => {
+    // Detect reversible races along the full trace and insert wakeup sequences into each frame's wakeup tree.
+    for (const { depth, seq } of findWakeups(steps)) {
+      const frame = stack[depth]!
+      insertWut(frame.wut, frame.sleep, seq)
+    }
+
+    // Backtrack through frames added by this branch in reverse depth order.
+    for (let d = stack.length - 1; d >= baseDepth; d--) {
+      const frame = stack[d]!
+      const firstChild = frame.wut.children.shift()!
+      frame.sleep.set(firstChild.laneId, steps[d]!.access)
+      while (frame.wut.children.length > 0) {
+        if (orderings >= limit) { hitLimit = true; stack.length = baseDepth; return observedParent }
+        const next = frame.wut.children[0]!
+        frame.exploredCount++
+        const nextPrefix = steps.slice(0, d).map((s) => s.laneId)
+        nextPrefix.push(next.laneId)
+        const observed = await runBranch(nextPrefix, next.node, frame.sleep)
+        if (failure || hitLimit) { stack.length = baseDepth; return observedParent }
+        // `next` was fully explored: pop it and move its observed access into `frame.sleep`.
+        frame.wut.children.shift()
+        frame.sleep.set(next.laneId, observed!)
+      }
+      if (frame.readyCount > frame.exploredCount) wasReduced = true
+      stack.pop()
+    }
+    return observedParent
+  }
 
   const runBranch = async (
     prefixLanes: readonly string[],
@@ -516,7 +535,6 @@ async function exploreOptimal(scenario: Scenario, limit: number): Promise<Explor
     const wutByDepth = new Map<number, WutNode>()
     let cursor: WutNode = branchWut
     let replayError: Error | undefined
-    let sleepBlocked = false
 
     const pickLane = (ready: readonly ReadyLane[], want: string, stepDepth: number): number => {
       const index = ready.findIndex((entry) => entry.laneId === want)
@@ -540,26 +558,20 @@ async function exploreOptimal(scenario: Scenario, limit: number): Promise<Explor
 
       wutByDepth.set(stepDepth, cursor)
       if (cursor.children.length > 0) {
-        const first = cursor.children[0]!
-        const index = pickLane(ready, first.laneId, stepDepth)
-        cursor = first.node
+        const firstChild = cursor.children[0]!
+        const index = pickLane(ready, firstChild.laneId, stepDepth)
+        cursor = firstChild.node
         return index
       }
       const sleep = sleepByDepth.get(stepDepth)!
       const index = ready.findIndex((entry) => !sleep.has(entry.laneId))
-      if (index < 0) {
-        sleepBlocked = true
-        throw sleepBlocked
-      }
-      const picked = ready[index]!
-      const nextNode = makeWutNode()
-      cursor.children.push({ laneId: picked.laneId, access: GLOBAL_ACCESS, node: nextNode })
-      cursor = nextNode
+      if (index < 0) throw SLEEP_BLOCKED
+      cursor = makeWutNode()
       return index
     }, true)
 
     if (replayError) throw replayError
-    if (sleepBlocked) {
+    if (made.error === SLEEP_BLOCKED) {
       wasReduced = true
       return made.steps[prefixLanes.length - 1]!.access
     }
@@ -571,63 +583,50 @@ async function exploreOptimal(scenario: Scenario, limit: number): Promise<Explor
 
     const steps = made.steps
     const baseDepth = prefixLanes.length
-    const observedParent = baseDepth > 0 ? steps[baseDepth - 1]!.access : undefined
+    const observedParent = steps[baseDepth - 1]!.access
 
     // Push stack frames for every step from `baseDepth` onwards (including single-ready steps so depth indices align).
+    // Replacing `wut.children[0].node` with a fresh empty node is safe: deeper frames already hold the original child
+    // nodes via `wutByDepth`, and no wakeup inserted at depth `d` ever descends through `steps[d].laneId`.
     for (let d = baseDepth; d < steps.length; d++) {
       const step = steps[d]!
       const sleep = sleepByDepth.get(d)!
       const wut = wutByDepth.get(d)!
-      wut.children[0] = { laneId: step.laneId, access: step.access, node: wut.children[0]!.node }
+      wut.children[0] = { laneId: step.laneId, access: step.access, node: makeWutNode() }
       stack.push({ sleep, wut, readyCount: step.readyLaneIds.length, exploredCount: 1 })
     }
 
-    // Detect reversible races along the full trace and insert wakeup sequences into each frame's wakeup tree.
-    for (const { depth, seq } of findWakeups(steps)) {
-      const frame = stack[depth]!
-      insertWut(frame.wut, frame.sleep, seq)
-    }
-
-    // Backtrack through frames added by this branch in reverse depth order.
-    for (let d = stack.length - 1; d >= baseDepth; d--) {
-      const frame = stack[d]!
-      const first = frame.wut.children.shift()!
-      frame.sleep.set(first.laneId, steps[d]!.access)
-      while (frame.wut.children.length > 0) {
-        if (orderings >= limit) { hitLimit = true; stack.length = baseDepth; return observedParent }
-        const next = frame.wut.children[0]!
-        frame.exploredCount++
-        const nextPrefix = steps.slice(0, d).map((s) => s.laneId)
-        nextPrefix.push(next.laneId)
-        const observed = await runBranch(nextPrefix, next.node, frame.sleep)
-        if (failure || hitLimit) { stack.length = baseDepth; return observedParent }
-        // `next` was fully explored: pop it and move its observed access into `frame.sleep`.
-        frame.wut.children.shift()
-        frame.sleep.set(next.laneId, observed!)
-      }
-      if (frame.readyCount > frame.exploredCount) wasReduced = true
-      stack.pop()
-    }
-    return observedParent
+    return finishBranch(steps, baseDepth, observedParent)
   }
 
-  await runBranch([], makeWutNode(), new Map())
+  // Seed initial stack directly from Ordering 1 without re-running it.
+  let rootCursor = makeWutNode()
+  for (const step of first.steps) {
+    const nextNode = makeWutNode()
+    rootCursor.children.push({ laneId: step.laneId, access: step.access, node: nextNode })
+    stack.push({ sleep: new Map(), wut: rootCursor, readyCount: step.readyLaneIds.length, exploredCount: 1 })
+    rootCursor = nextNode
+  }
+
+  await finishBranch(first.steps, 0, undefined)
   if (failure) return { orderings, complete: false, ...(wasReduced ? { reduced: true as const } : {}), failure }
   return { orderings, complete: !hitLimit, ...(wasReduced ? { reduced: true as const } : {}) }
 }
 
 /**
- * Runs a scenario under every ordering its lanes allow, stopping at the first that fails. When tasks opt into
- * `{ tracked: true }` and `reduce` is not `false`, Optimal DPOR explores one representative ordering per equivalence
- * class.
+ * Runs a scenario under every ordering its lanes allow, stopping at the first that fails. Untracked scenarios run
+ * plain unreduced search by construction; when tasks opt into `{ tracked: true }` and `reduce` is not `false`,
+ * Optimal DPOR explores one representative ordering per equivalence class.
  */
 export async function explore(scenario: Scenario, options: ExploreOptions = {}): Promise<Explored> {
   const limit = options.limit ?? 50_000
   if (!(limit === Number.POSITIVE_INFINITY || (Number.isSafeInteger(limit) && limit >= 1))) {
     throw new RangeError(`explore expects limit to be a positive safe integer or Infinity, and was given ${String(limit)}`)
   }
-  if (options.reduce === false) return exploreUnreduced(scenario, limit)
-  return exploreOptimal(scenario, limit)
+  const first = await once(scenario, () => 0)
+  if (options.reduce === false || !first.anyTracked) return exploreUnreduced(scenario, limit, first)
+  if ('error' in first) return { orderings: 1, complete: false, failure: { choices: first.choices, taken: first.taken, error: first.error } }
+  return exploreOptimal(scenario, limit, first)
 }
 
 /**

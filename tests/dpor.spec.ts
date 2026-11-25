@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { auditIndependence, everyOrder, explore, replay, sample, type Resource, type Scenario } from '../src/index.ts'
 import { conflicts, findWakeups, insertWut, makeAccess, makeWutNode, type StepRef, type TraceStep } from '../src/dpor.ts'
+import { runDifferentialFuzz } from './support/fuzz-programs.ts'
 
 describe('Optimal DPOR and resource tracking', () => {
   it('collapses independent tracked lanes to one equivalence class while reduce: false runs every interleaving', async () => {
@@ -174,16 +175,19 @@ describe('Optimal DPOR and resource tracking', () => {
     expect([...seen].sort()).toEqual(['1', '2'])
   })
 
-  it('tracks clock reads, advances, same-due ties, and timer cancellations automatically', async () => {
-    // 1. Timer advancing time commutes with a tracked task that never reads clock, but conflicts with one that does.
-    const noClockRead = await explore((schedule) => {
+  it('keeps timer scheduling, cancellation, and firing globally conflicting while reducing independent non-timer lanes', async () => {
+    // 1. Timer operations conflict globally with tracked lanes (both clock readers and non-readers), while
+    //    independent non-timer lanes still commute around them.
+    const timerAndTwoLanes = await explore((schedule) => {
       const a = schedule.resource('a')
       const b = schedule.resource('b')
-      schedule.clock.after(10, () => { schedule.write(a) }, { tracked: true })
+      schedule.clock.after(10, () => {}, { tracked: true })
+      schedule.later({ label: 'a' }, () => { schedule.write(a) }, { tracked: true })
       schedule.later({ label: 'b' }, () => { schedule.write(b) }, { tracked: true })
       return () => {}
     })
-    expect(noClockRead).toEqual({ orderings: 1, complete: true, reduced: true })
+    // Full search has 6 orderings; `a` and `b` commute on the same side of the timer -> 4 equivalence classes.
+    expect(timerAndTwoLanes).toEqual({ orderings: 4, complete: true, reduced: true })
 
     const timesSeen = new Set<number>()
     const withClockRead = await explore((schedule) => {
@@ -196,26 +200,29 @@ describe('Optimal DPOR and resource tracking', () => {
     expect(withClockRead).toEqual({ orderings: 2, complete: true })
     expect([...timesSeen].sort((x, y) => x - y)).toEqual([0, 10])
 
-    // 2. Zero-delay timer at t=0 does not advance clock (read(CLOCK)), so it commutes with another clock reader.
-    const zeroDelay = await explore((schedule) => {
+    // 2. Two tracked lanes that only read clock.now()/monotonic() (no timer firing between them) commute.
+    const twoClockReaders = await explore((schedule) => {
       const a = schedule.resource('a')
       const b = schedule.resource('b')
-      schedule.clock.after(0, () => { schedule.write(a) }, { tracked: true })
+      schedule.later({ label: 'a' }, () => { schedule.write(a); void schedule.clock.now() }, { tracked: true })
       schedule.later({ label: 'b' }, () => { schedule.write(b); void schedule.clock.monotonic() }, { tracked: true })
       return () => {}
     })
-    expect(zeroDelay).toEqual({ orderings: 1, complete: true, reduced: true })
+    expect(twoClockReaders).toEqual({ orderings: 1, complete: true, reduced: true })
 
-    // 3. Different due times commute; identical due times conflict to preserve FIFO tie order.
+    // 3. Concurrent timer scheduling explores all clock-advance interleavings (including b -> t50 -> a -> t60) and FIFO ties.
+    const diffDueTimes = new Set<string>()
     const diffDue = await explore((schedule) => {
       const a = schedule.resource('a')
       const b = schedule.resource('b')
-      schedule.later({ label: 'a' }, () => { schedule.clock.after(10, () => { schedule.write(a) }, { tracked: true }) }, { tracked: true })
-      schedule.later({ label: 'b' }, () => { schedule.clock.after(50, () => { schedule.write(b) }, { tracked: true }) }, { tracked: true })
-      return () => {}
+      let ta = -1
+      let tb = -1
+      schedule.later({ label: 'a' }, () => { schedule.clock.after(10, () => { schedule.write(a); ta = schedule.clock.now() }, { tracked: true }) }, { tracked: true })
+      schedule.later({ label: 'b' }, () => { schedule.clock.after(50, () => { schedule.write(b); tb = schedule.clock.now() }, { tracked: true }) }, { tracked: true })
+      return () => { diffDueTimes.add(`${ta},${tb}`) }
     })
-    // `a` and `b` commute at t=0 (different due times 10 vs 50), while `b` races with `t10` advancing sys:clock -> 2 orderings (not 3).
-    expect(diffDue).toEqual({ orderings: 2, complete: true, reduced: true })
+    expect(diffDue.complete).toBe(true)
+    expect([...diffDueTimes].sort()).toEqual(['10,50', '10,60', '60,50'])
 
     const tieOrders = new Set<string>()
     const sameDue = await explore((schedule) => {
@@ -243,7 +250,7 @@ describe('Optimal DPOR and resource tracking', () => {
     expect(cancelled.complete).toBe(true)
     expect([...cancelOutcomes].sort()).toEqual(['true,false,true', 'true,true,false'])
 
-    // 5. Creating and immediately cancelling a timer inside the same step does not create a spurious wakeup.
+    // 5. Creating and immediately cancelling a timer inside the same step does not create a spurious `['clock']` wakeup.
     const selfCancel = await explore((schedule) => {
       const a = schedule.resource('a')
       const b = schedule.resource('b')
@@ -255,7 +262,87 @@ describe('Optimal DPOR and resource tracking', () => {
       schedule.later({ label: 'b' }, () => { schedule.write(b) }, { tracked: true })
       return () => {}
     })
-    expect(selfCancel).toEqual({ orderings: 1, complete: true, reduced: true })
+    expect(selfCancel).toEqual({ orderings: 2, complete: true })
+
+    // 6. Nested timer regressions (independent fuzzer Scenarios A, B, and C): exact reachable-state match with zero throws.
+    const checkMatchesFull = async (make: (states: Set<string>) => Scenario): Promise<{ full: number; dpor: number }> => {
+      const fullStates = new Set<string>()
+      const dporStates = new Set<string>()
+      const full = await explore(make(fullStates), { reduce: false })
+      const dpor = await explore(make(dporStates), { reduce: true })
+      expect(full.complete).toBe(true)
+      expect(dpor.complete).toBe(true)
+      expect([...dporStates].sort()).toEqual([...fullStates].sort())
+      return { full: full.orderings, dpor: dpor.orderings }
+    }
+
+    // Scenario A: abortable sleep(20) + after(10) + clock.now() across two tracked lanes.
+    const resA = await checkMatchesFull((states) => (schedule) => {
+      const ac = new AbortController()
+      const acTok = schedule.resource('ac')
+      const reg = schedule.resource('reg')
+      let value = 0
+      let seenNow = -1
+      let seenValue = -1
+      let slept = 'pending'
+      const laneA = { label: 'A' }
+      const laneB = { label: 'B' }
+      schedule.later(laneA, () => { seenNow = schedule.clock.now() }, { tracked: true })
+      schedule.later(laneA, () => { schedule.write(acTok); ac.abort(new Error('stop')) }, { tracked: true })
+      schedule.later(laneB, () => {
+        schedule.read(acTok)
+        void schedule.clock.sleep(20, { signal: ac.signal, tracked: true }).then(
+          () => { slept = 'ok'; schedule.write(reg); value = 1 },
+          () => { slept = 'aborted' },
+        )
+        schedule.clock.after(10, () => {}, { tracked: true })
+      }, { tracked: true })
+      schedule.later(laneB, () => { schedule.read(reg); seenValue = value }, { tracked: true })
+      return () => { states.add(`now=${seenNow} read=${seenValue} sleep=${slept}`) }
+    })
+    expect(resA.dpor).toBeLessThan(resA.full)
+
+    // Scenario B: nested timer spawned inside sleep(0) callback + concurrent after(0) + clock.now() (no aborts/cancels).
+    await checkMatchesFull((states) => (schedule) => {
+      let first = -1
+      let second = -1
+      const laneA = { label: 'A' }
+      const laneB = { label: 'B' }
+      schedule.later(laneA, () => { schedule.clock.after(0, () => { first = schedule.clock.now() }, { tracked: true }) }, { tracked: true })
+      schedule.later(laneB, () => {
+        void schedule.clock.sleep(0, { tracked: true }).then(() => { schedule.clock.after(10, () => {}, { tracked: true }) })
+      }, { tracked: true })
+      schedule.later(laneB, () => { second = schedule.clock.now() }, { tracked: true })
+      return () => { states.add(`timerSaw=${first} laneBSaw=${second}`) }
+    })
+
+    // Scenario C: two timers where one spawns breaks() and another is cancelled (must not throw `clock.0:0` replay error).
+    const resC = await checkMatchesFull((states) => (schedule) => {
+      const slot = schedule.resource('slot')
+      const reg = schedule.resource('reg')
+      let cancel: (() => void) | undefined
+      let value = 0
+      let seen = -1
+      const laneA = { label: 'A' }
+      const laneB = { label: 'B' }
+      schedule.later(laneA, () => {
+        const stop = schedule.clock.after(10, () => {
+          void schedule.breaks('b', new Error('x'), { tracked: true }).catch(() => { schedule.write(reg); value = 2 })
+        }, { tracked: true })
+        schedule.write(slot)
+        cancel = stop
+      }, { tracked: true })
+      schedule.later(laneB, () => {
+        const stop = schedule.clock.after(0, () => { schedule.read(reg); seen = value }, { tracked: true })
+        schedule.write(slot)
+        cancel = stop
+      }, { tracked: true })
+      schedule.later(laneB, () => {
+        schedule.does({ label: 'd', tracked: true }, ['nothing', () => {}], ['cancel', () => { schedule.read(slot); cancel?.() }])
+      }, { tracked: true })
+      return () => { states.add(`value=${value} seen=${seen}`) }
+    })
+    expect(resC.dpor).toBeLessThan(resC.full)
   })
 
   it('works cleanly with outside() under Optimal DPOR', async () => {
@@ -333,120 +420,59 @@ describe('Optimal DPOR and resource tracking', () => {
     await expect(explore(unsound)).rejects.toThrow(/Unsound tracked task/)
   })
 
-  it('differential fuzz: Optimal DPOR matches unreduced explore() reachable states across 40 randomized programs', async () => {
-    let prng = 42
-    const next = (): number => {
-      prng = (prng + 0x6d2b79f5) >>> 0
-      let t = prng
-      t = Math.imul(t ^ (t >>> 15), t | 1)
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  it('differential fuzz: wakeup-tree DPOR matches unreduced explore() across 30 nested programs (mixed, all, timers)', async () => {
+    const mixed = await runDifferentialFuzz(explore, { seed: 42, programs: 10, maxFull: 1_000, profile: 'mixed' })
+    const all = await runDifferentialFuzz(explore, { seed: 100_045, programs: 10, maxFull: 1_000, profile: 'all' })
+    const timers = await runDifferentialFuzz(explore, { seed: 200_048, programs: 10, maxFull: 1_000, profile: 'timers' })
+    expect(mixed.programs + all.programs + timers.programs).toBe(30)
+    expect(mixed.totalReduced + all.totalReduced + timers.totalReduced).toBeLessThan(
+      mixed.totalUnreduced + all.totalUnreduced + timers.totalUnreduced,
+    )
+  })
+
+  it('falls back to plain unreduced search when nothing opts into tracked and handles tracked ordering-1 failure', async () => {
+    // Purely untracked scenario never sets `reduced` and matches unreduced ordering count exactly.
+    const untracked: Scenario = (schedule) => {
+      schedule.does('a', ['1', () => {}], ['2', () => {}])
+      schedule.does('b', ['1', () => {}], ['2', () => {}])
+      return () => {}
     }
-    const int = (n: number): number => Math.floor(next() * n)
+    const def = await explore(untracked)
+    const explicit = await explore(untracked, { reduce: false })
+    expect(def).toEqual({ orderings: 6, complete: true })
+    expect(def).toEqual(explicit)
 
-    type Op =
-      | { kind: 'read'; reg: number }
-      | { kind: 'write'; reg: number; val: number }
-      | { kind: 'write2'; reg1: number; reg2: number; val: number }
-      | { kind: 'inc'; reg: number }
-      | { kind: 'readClock' }
-      | { kind: 'spawn'; reg: number; val: number }
-      | { kind: 'after'; delay: number; reg: number; val: number }
-
-    let totalUnreduced = 0
-    let totalReduced = 0
-
-    for (let prog = 0; prog < 40; prog++) {
-      const numLanes = 2 + int(2)
-      const numRegs = 2 + int(2)
-      const laneOps: Op[][] = []
-      const laneTracked: boolean[] = []
-      for (let l = 0; l < numLanes; l++) {
-        const steps = 1 + int(2)
-        const ops: Op[] = []
-        for (let s = 0; s < steps; s++) {
-          const r = int(13)
-          if (r < 3) ops.push({ kind: 'read', reg: int(numRegs) })
-          else if (r < 6) ops.push({ kind: 'write', reg: int(numRegs), val: 1 + int(5) })
-          else if (r < 8) ops.push({ kind: 'write2', reg1: int(numRegs), reg2: int(numRegs), val: 1 + int(5) })
-          else if (r < 10) ops.push({ kind: 'inc', reg: int(numRegs) })
-          else if (r === 10) ops.push({ kind: 'readClock' })
-          else if (r === 11) ops.push({ kind: 'spawn', reg: int(numRegs), val: 10 + int(5) })
-          else ops.push({ kind: 'after', delay: int(3) * 10, reg: int(numRegs), val: 20 + int(5) })
+    // Ordering 1 executes only untracked tasks, so `explore()` stays in plain unreduced search even when
+    // another branch spawns independent tracked tasks (verifies plain-search fallback is actually taken).
+    const trackedOnlyOnBranch2: Scenario = (schedule) => {
+      let aRan = false
+      schedule.later({ label: 'a' }, () => { aRan = true })
+      schedule.later({ label: 'b' }, () => {
+        if (!aRan) {
+          const rx = schedule.resource('rx')
+          const ry = schedule.resource('ry')
+          schedule.later({ label: 'x' }, () => { schedule.write(rx) }, { tracked: true })
+          schedule.later({ label: 'y' }, () => { schedule.write(ry) }, { tracked: true })
         }
-        laneOps.push(ops)
-        laneTracked.push(int(5) > 0)
-      }
-      const addTimer = int(2) === 0
-      const timerDelay = (1 + int(3)) * 10
-      const timerReg = int(numRegs)
-
-      const makeScenario = (states: Set<string>): Scenario => (schedule) => {
-        const regTokens = Array.from({ length: numRegs }, (_, i) => schedule.resource(`r${i}`))
-        const regs = Array<number>(numRegs).fill(0)
-        const reads: number[] = []
-        const runOp = (op: Op, tracked: boolean): void => {
-          if (op.kind === 'read') {
-            schedule.read(regTokens[op.reg]!)
-            reads.push(regs[op.reg]!)
-          } else if (op.kind === 'write') {
-            schedule.write(regTokens[op.reg]!)
-            regs[op.reg] = op.val
-          } else if (op.kind === 'write2') {
-            schedule.write(regTokens[op.reg1]!)
-            schedule.write(regTokens[op.reg2]!)
-            regs[op.reg1] = op.val
-            regs[op.reg2] = op.val + 10
-          } else if (op.kind === 'inc') {
-            schedule.read(regTokens[op.reg]!)
-            schedule.write(regTokens[op.reg]!)
-            regs[op.reg] = regs[op.reg]! + 1
-          } else if (op.kind === 'readClock') {
-            reads.push(schedule.clock.now())
-          } else if (op.kind === 'after') {
-            schedule.clock.after(op.delay, () => {
-              schedule.write(regTokens[op.reg]!)
-              regs[op.reg] = op.val
-              reads.push(schedule.clock.now())
-            }, { tracked })
-          } else {
-            schedule.later({ label: `spawn-${op.reg}` }, () => {
-              schedule.write(regTokens[op.reg]!)
-              regs[op.reg] = op.val
-            }, { tracked })
-          }
-        }
-        for (let l = 0; l < numLanes; l++) {
-          const lane = { label: `lane-${l}` }
-          const tracked = laneTracked[l]!
-          for (const op of laneOps[l]!) {
-            schedule.later(lane, () => runOp(op, tracked), { tracked })
-          }
-        }
-        if (addTimer) {
-          schedule.clock.after(timerDelay, () => {
-            schedule.write(regTokens[timerReg]!)
-            regs[timerReg] = 99
-          }, { tracked: true })
-        }
-        return () => {
-          states.add(`${regs.join(',')}|${[...reads].sort((a, b) => a - b).join(',')}`)
-        }
-      }
-
-      const fullStates = new Set<string>()
-      const dporStates = new Set<string>()
-      const full = await explore(makeScenario(fullStates), { reduce: false })
-      const dpor = await explore(makeScenario(dporStates), { reduce: true })
-      expect(full.complete).toBe(true)
-      expect(dpor.complete).toBe(true)
-      expect(dpor.orderings).toBeLessThanOrEqual(full.orderings)
-      expect([...dporStates].sort()).toEqual([...fullStates].sort())
-      totalUnreduced += full.orderings
-      totalReduced += dpor.orderings
+      })
+      return () => {}
     }
+    expect(await explore(trackedOnlyOnBranch2)).toEqual({ orderings: 7, complete: true })
 
-    expect(totalReduced).toBeLessThan(totalUnreduced)
+    // Tracked scenario failing on ordering 1 reports exact failure without entering DPOR backtracking.
+    const trackedFailFirst: Scenario = (schedule) => {
+      const r = schedule.resource('r')
+      schedule.later({ label: 'a' }, () => { schedule.write(r); throw new Error('boom-first') }, { tracked: true })
+      schedule.later({ label: 'b' }, () => { schedule.write(r) }, { tracked: true })
+      return () => {}
+    }
+    const fail1 = await explore(trackedFailFirst)
+    expect(fail1.orderings).toBe(1)
+    expect(fail1.complete).toBe(false)
+    expect(fail1.reduced).toBeUndefined()
+    expect(fail1.failure?.choices).toEqual([0])
+    expect(fail1.failure?.taken).toEqual(['a'])
+    expect(String(fail1.failure?.error)).toMatch(/boom-first/)
   })
 })
 
@@ -708,14 +734,17 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     expect(w034Lanes).not.toContain('L31')
     expect(w034Lanes).not.toContain('L33')
 
-    // Disabling wakeup for timer cancellation uses GLOBAL_ACCESS so a later `[other, clock]` wakeup is not subsumed under `clock`.
+    // Disabling wakeup for timer cancellation/preemption uses GLOBAL_ACCESS on a single `['clock']` step.
     const cancelTrace: TraceStep[] = [
       { laneId: 'c', what: 'cancel', pushedBy: -1, preemptedClock: true, access: w('t'), readyLaneIds: ['c', 'clock', 'o'] },
+      { laneId: 'o', what: 'ind', pushedBy: -1, preemptedClock: false, access: w('r'), readyLaneIds: ['o', 'clock'] },
     ]
-    const [disableWk] = findWakeups(cancelTrace)
-    expect(disableWk).toBeDefined()
+    const cancelWakeups = findWakeups(cancelTrace)
+    expect(cancelWakeups).toHaveLength(1)
+    expect(cancelWakeups[0]!.depth).toBe(0)
+    expect(cancelWakeups[0]!.seq.map((s) => s.laneId)).toEqual(['clock'])
     const cancelWut = seededRoot('c', w('t'))
-    insertWut(cancelWut, new Map(), disableWk!.seq)
+    insertWut(cancelWut, new Map(), cancelWakeups[0]!.seq)
     insertWut(cancelWut, new Map(), [
       { laneId: 'o', access: w('r') },
       { laneId: 'clock', access: w('t') },
@@ -772,12 +801,12 @@ describe('Optimal DPOR core helpers and edge cases', () => {
       return () => {}
     })).toEqual({ orderings: 1, complete: true, reduced: true })
 
-    // Tracked clock.sleep commutes with an independent tracked lane.
+    // clock.sleep(..., { tracked: true }) is accepted but remains globally conflicting for soundness.
     expect(await explore((s) => {
       void s.clock.sleep(10, { tracked: true })
       s.later({ label: 'b' }, () => {}, { tracked: true })
       return () => {}
-    })).toEqual({ orderings: 1, complete: true, reduced: true })
+    })).toEqual({ orderings: 2, complete: true })
 
     // Distinct dynamic lane labels pushed inside tracked steps commute (`push:dyn:${what}` distinguishes them).
     expect(await explore((s) => {
@@ -853,18 +882,6 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     })
     expect(laneSeqDistinct).toEqual({ orderings: 1, complete: true, reduced: true })
 
-    // Two timers created inside one step have distinct timer IDs so cancelling one commutes with the other firing.
-    const twoStepTimers = await explore((schedule) => {
-      schedule.later({ label: 'maker' }, () => {
-        schedule.clock.after(0, () => {}, { tracked: true })
-        const cancel2 = schedule.clock.after(0, () => {}, { tracked: true })
-        schedule.later({ label: 'c2' }, () => { cancel2() }, { tracked: true })
-      }, { tracked: true })
-      return () => {}
-    })
-    // T1 fires without conflicting with c2; only T2 and c2 race -> 2 orderings (not 3).
-    expect(twoStepTimers).toEqual({ orderings: 2, complete: true, reduced: true })
-
     // Dynamic access expansion on a wakeup branch: `observedParent` updates parentFrame.wut.children[0].access.
     const dynamicObserved = new Set<string>()
     const dynamicExpand = await explore((schedule) => {
@@ -898,19 +915,73 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     expect(bridge).toEqual({ orderings: 4, complete: true, reduced: true })
     expect([...bridgeObserved].sort()).toEqual(['a,b', 'a,c', 'b,b', 'b,c'])
 
-    // Timer cancellation disabling the only non-sleeping lane (reader + timer + canceller) handles sleep-set blocking cleanly.
-    const cancelSleepOutcomes = new Set<string>()
-    const cancelSleep = await explore((schedule) => {
-      let seenTime = -1
-      let fired = false
-      let cancel!: () => void
-      schedule.later({ label: 'reader' }, () => { seenTime = schedule.clock.now() }, { tracked: true })
-      cancel = schedule.clock.after(10, () => { fired = true }, { tracked: true })
-      schedule.later({ label: 'canceller' }, () => { cancel() }, { tracked: true })
-      return () => { cancelSleepOutcomes.add(`${seenTime},${fired}`) }
-    })
-    expect(cancelSleep).toEqual({ orderings: 3, complete: true, reduced: true })
-    expect([...cancelSleepOutcomes].sort()).toEqual(['0,false', '0,true', '10,true'])
+    // Sleep-set-blocked abort via `SLEEP_BLOCKED`: dynamic access shrinking leaves `b` in `sleep` when `c -> a` runs,
+    // making `SLEEP_BLOCKED` the sole reason `reduced: true` is set (4 completed orderings out of 6, exact state match).
+    const ssbObserved = new Set<string>()
+    const ssbScenario: Scenario = (schedule) => {
+      const r1 = schedule.resource('r1')
+      const r2 = schedule.resource('r2')
+      const r3 = schedule.resource('r3')
+      // read()/write() outside a task are documented safe no-ops.
+      schedule.read(r1)
+      schedule.write(r1)
+      let v1 = 0
+      let cSet = false
+      let saw = -1
+      schedule.later({ label: 'a' }, () => {
+        schedule.read(r2)
+        if (!cSet) { schedule.write(r1); v1 = 1 }
+      }, { tracked: true })
+      schedule.later({ label: 'b' }, () => {
+        schedule.read(r1)
+        schedule.write(r1)
+        saw = v1
+        if (v1 === 1) schedule.write(r3)
+      }, { tracked: true })
+      schedule.later({ label: 'c' }, () => {
+        schedule.write(r2)
+        schedule.write(r3)
+        cSet = true
+      }, { tracked: true })
+      return () => { ssbObserved.add(`${v1},${saw},${cSet}`) }
+    }
+    const ssb = await explore(ssbScenario)
+    expect(ssb).toEqual({ orderings: 4, complete: true, reduced: true })
+    const ssbDporStates = [...ssbObserved].sort()
+    ssbObserved.clear()
+    const ssbFull = await explore(ssbScenario, { reduce: false })
+    expect(ssbFull).toEqual({ orderings: 6, complete: true })
+    expect(ssbDporStates).toEqual([...ssbObserved].sort())
+
+    // Timer cancellation with concurrent reads and sleep (fuzzer #1797 regression) matches unreduced states exactly.
+    const sleepCancelStates = new Set<string>()
+    const sleepCancelScenario: Scenario = (schedule) => {
+      const r0 = schedule.resource('r0')
+      const r2 = schedule.resource('r2')
+      let v0 = 0
+      const reads: number[] = []
+      let sleepOutcome = 'none'
+      const ac = new AbortController()
+      schedule.clock.after(20, () => { schedule.write(r0); v0 = 99 }, { tracked: true })
+      void schedule.clock.sleep(10, { signal: ac.signal, tracked: true }).then(
+        () => { sleepOutcome = 'ok' },
+        () => { sleepOutcome = 'aborted' },
+      )
+      const l0 = { label: 'l0' }
+      schedule.later(l0, () => { schedule.read(r0); reads.push(v0) }, { tracked: true })
+      schedule.later(l0, () => { reads.push(schedule.clock.monotonic()) }, { tracked: true })
+      const l1 = { label: 'l1' }
+      schedule.later(l1, () => { schedule.write(r2) }, { tracked: true })
+      schedule.later(l1, () => { ac.abort(new Error('stop')) }, { tracked: true })
+      return () => { sleepCancelStates.add(`${reads.join(',')}|${sleepOutcome}`) }
+    }
+    const sleepCancelDpor = await explore(sleepCancelScenario)
+    expect(sleepCancelDpor.complete).toBe(true)
+    expect(sleepCancelStates.has('0,0|ok')).toBe(true)
+    const dporSnapshot = [...sleepCancelStates].sort()
+    sleepCancelStates.clear()
+    await explore(sleepCancelScenario, { reduce: false })
+    expect(dporSnapshot).toEqual([...sleepCancelStates].sort())
   })
 
   it('tracks clock.monotonic(), clock.after() reading clock, canceller-first timer cancellation, sleep abort cleanup, and outside() conflicts', async () => {
@@ -973,12 +1044,10 @@ describe('Optimal DPOR core helpers and edge cases', () => {
       schedule.later({ label: 'b' }, () => { schedule.write(b) }, { tracked: true })
       return () => {}
     })
-    expect(selfPreempt).toEqual({ orderings: 1, complete: true, reduced: true })
+    expect(selfPreempt).toEqual({ orderings: 4, complete: true })
 
-    // 2e. Scheduling a LATER timer behind a pending 0 ms timer does not preempt it (`timers.slice(at)` is empty -> 1 invocation, no sleep-blocked retry).
-    let noPreemptInvocations = 0
+    // 2e. Scheduling a LATER timer behind a pending 0 ms timer does not preempt it (`timers.slice(at)` is empty).
     const noPreemptLater = await explore((schedule) => {
-      noPreemptInvocations++
       const a = schedule.resource('a')
       const b = schedule.resource('b')
       schedule.later({ label: 'setter' }, () => {
@@ -987,8 +1056,7 @@ describe('Optimal DPOR core helpers and edge cases', () => {
       schedule.clock.after(0, () => { schedule.write(b) }, { tracked: true })
       return () => {}
     })
-    expect(noPreemptLater).toEqual({ orderings: 1, complete: true, reduced: true })
-    expect(noPreemptInvocations).toBe(1)
+    expect(noPreemptLater).toEqual({ orderings: 2, complete: true })
 
     // 3. Canceller registered BEFORE the timer so canceller runs FIRST at depth 0 (exercises disabling wakeup!).
     const cancelFirstOutcomes = new Set<string>()
@@ -1002,16 +1070,7 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     expect(cancelFirst).toEqual({ orderings: 2, complete: true })
     expect([...cancelFirstOutcomes].sort()).toEqual(['false', 'true'])
 
-    // 4. Two setup timers where only one is cancelled (distinct setup timer IDs mean T1 does not conflict with c2 -> 2 orderings, not 3).
-    const twoSetupTimers = await explore((schedule) => {
-      schedule.clock.after(0, () => {}, { tracked: true })
-      const cancel2 = schedule.clock.after(0, () => {}, { tracked: true })
-      schedule.later({ label: 'c2' }, () => { cancel2() }, { tracked: true })
-      return () => {}
-    })
-    expect(twoSetupTimers).toEqual({ orderings: 2, complete: true, reduced: true })
-
-    // 5. Cancelling a timer during setup removes it cleanly with no activeStep.
+    // 4. Cancelling a timer during setup removes it cleanly with no activeStep.
     const setupCancel = await explore((schedule) => {
       let fired = false
       const cancel = schedule.clock.after(10, () => { fired = true }, { tracked: true })
@@ -1020,7 +1079,7 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     })
     expect(setupCancel).toEqual({ orderings: 1, complete: true })
 
-    // 6. clock.sleep removes both onAbort and onLateAbort listeners with event name `'abort'`.
+    // 5. clock.sleep removes its abort listener with event name `'abort'` on both resolution and abort.
     const activeListeners = new Map<unknown, string>()
     let everAdded = 0
     const trackedSignal = (): { signal: AbortSignal; abort: () => void } => {
@@ -1052,7 +1111,7 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     expect(everAdded).toBeGreaterThan(2)
     expect(activeListeners.size).toBe(0)
 
-    // 7. Tracked tasks calling outside() and done() in separate steps conflict on 'sys:outside'.
+    // 6. Tracked tasks calling outside() and done() in separate steps conflict on 'sys:outside'.
     const outsideOrders = new Set<string>()
     const withOutside = await explore((schedule) => {
       const log: string[] = []
