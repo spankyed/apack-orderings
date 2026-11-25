@@ -94,8 +94,10 @@ export interface Schedule {
   /**
    * Something outside the schedule is under way, such as a message on a real socket: the run does not come to rest
    * until what is returned is called. What it does when it lands, it puts into a lane, and the schedule chooses as
-   * ever. Nothing outside is chosen: it lands when it lands. If the returned callback is never called, the run waits
-   * indefinitely (the runaway guard counts tasks, not wall time).
+   * ever. Nothing outside is chosen: it lands when it lands. Under multi-ordering `explore()` / `everyOrder()`, do
+   * not race real wall-clock `outside()` callbacks against concurrent ready local lanes (use `work()`, `later()`, or
+   * `clock` for deterministic interleavings, or trigger `outside()` work only at a deterministic idle point). If the
+   * returned callback is never called, the run waits indefinitely (the runaway guard counts tasks, not wall time).
    */
   outside(): () => void
   /**
