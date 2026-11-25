@@ -710,8 +710,8 @@ const sameLaneSet = (a: readonly string[], b: readonly string[] | undefined): bo
 const sameSet = (a: ReadonlySet<string>, b: ReadonlySet<string>): boolean =>
   a.size === b.size && [...a].every((item) => b.has(item))
 
-const sameAccess = (a: StepAccess, b: StepAccess | undefined): boolean =>
-  b !== undefined && a.global === b.global && sameSet(a.reads, b.reads) && sameSet(a.writes, b.writes)
+const sameAccess = (a: StepAccess, b: StepAccess): boolean =>
+  a.global === b.global && sameSet(a.reads, b.reads) && sameSet(a.writes, b.writes)
 
 const sameError = (a: unknown, b: unknown): boolean =>
   a instanceof Error && b instanceof Error ? a.name === b.name && a.message === b.message : Object.is(a, b)
@@ -760,7 +760,11 @@ export async function auditIndependence(scenario: Scenario, options: AuditOption
         violation: { choices: orig.choices, prefix: prefixChoices, first: a.what, second: b.what, reason },
       })
       if (swapProblem) return fail(swapProblem)
-      if (('error' in orig) !== ('error' in swapped) || ('error' in orig && !sameError(orig.error, swapped.error))) {
+      if (
+        ('error' in orig) !== ('error' in swapped)
+        || orig.inCheck !== swapped.inCheck
+        || ('error' in orig && !sameError(orig.error, swapped.error))
+      ) {
         return fail(`scenario outcome differed after swapping "${a.what}" and "${b.what}"`)
       }
       // If `b` itself threw at step `i + 1` in `orig`, swapping runs `b` at step `i` and aborts before `a` can run.
@@ -774,7 +778,7 @@ export async function auditIndependence(scenario: Scenario, options: AuditOption
             return fail(`ready lanes diverged after swapping "${a.what}" and "${b.what}"`)
           }
         }
-        if (!sameAccess(a.access, swapped.steps[i + 1]?.access) || !sameAccess(b.access, swapped.steps[i]!.access)) {
+        if (!sameAccess(a.access, swapped.steps[i + 1]!.access) || !sameAccess(b.access, swapped.steps[i]!.access)) {
           return fail(`resource accesses diverged after swapping "${a.what}" and "${b.what}"`)
         }
         for (let k = i + 2; k < steps.length; k++) {

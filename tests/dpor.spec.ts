@@ -1431,7 +1431,27 @@ describe('Optimal DPOR core helpers and edge cases', () => {
       return () => { throw new Error('identical boom') }
     }
     const dSameMsgEarly = await auditIndependence(sameMsgEarlyThrow, { seed: 2, runs: 10, swaps: 20 })
-    expect(dSameMsgEarly.violation?.reason).toMatch(/resource accesses diverged after swapping/)
+    expect(dSameMsgEarly.violation?.reason).toMatch(/scenario outcome differed after swapping/)
+
+    // 2e2. Downstream step `i + 2` throws `'same boom'` in one order while `check()` throws `'same boom'` in the swapped order.
+    const stepVsCheckSameErr: Scenario = (schedule) => {
+      const a = schedule.resource('a')
+      const b = schedule.resource('b')
+      let hidden = 0
+      schedule.later({ label: 'a' }, () => { schedule.write(a); hidden = 1 }, { tracked: true })
+      schedule.later({ label: 'b' }, () => {
+        schedule.write(b)
+        hidden = 2
+        schedule.later({ label: 'c' }, () => {
+          schedule.write(a)
+          schedule.write(b)
+          if (hidden === 1) throw new Error('same boom')
+        }, { tracked: true })
+      }, { tracked: true })
+      return () => { throw new Error('same boom') }
+    }
+    expect((await auditIndependence(stepVsCheckSameErr, { seed: 1, runs: 20, swaps: 50 })).violation?.reason)
+      .toMatch(/scenario outcome differed after swapping/)
 
     // 2f. Both orig and swapped fail in check() with different error messages, different error names, or different non-Error values.
     const diffErrorMsg: Scenario = (schedule) => {
@@ -1527,18 +1547,21 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     expect((await auditIndependence(throwAccessChanges, { seed: 1, runs: 10, swaps: 20 })).violation?.reason)
       .toMatch(/resource accesses diverged after swapping/)
 
-    const throwMovesToCheck: Scenario = (schedule) => {
+    const throwMovesToOtherStep: Scenario = (schedule) => {
       const a = schedule.resource('a')
       const b = schedule.resource('b')
-      let aRan = false
-      schedule.later({ label: 'a' }, () => { schedule.write(a); aRan = true }, { tracked: true })
+      let seen = 0
+      schedule.later({ label: 'a' }, () => {
+        schedule.write(a)
+        if (++seen === 2) throw new Error('same boom')
+      }, { tracked: true })
       schedule.later({ label: 'b' }, () => {
         schedule.write(b)
-        if (aRan) throw new Error('same boom')
+        if (++seen === 2) throw new Error('same boom')
       }, { tracked: true })
-      return () => { throw new Error('same boom') }
+      return () => {}
     }
-    expect((await auditIndependence(throwMovesToCheck, { seed: 1, runs: 10, swaps: 20 })).violation?.reason)
+    expect((await auditIndependence(throwMovesToOtherStep, { seed: 1, runs: 10, swaps: 20 })).violation?.reason)
       .toMatch(/resource accesses diverged after swapping/)
 
     // 2i. Global flag divergence (`a.global !== b.global`), downstream access divergence (`k >= i + 2`), and downstream `what` divergence.
