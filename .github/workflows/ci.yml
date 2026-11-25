@@ -1,7 +1,8 @@
 name: CI
 
-# Every push to master and every pull request runs the suite on Linux, macOS and Windows: a schedule runs in a
-# window and in Node on all three. A newer push to the same branch or pull request cancels the run before it.
+# Every push to master and every pull request runs the suite on Linux, macOS and Windows, plus real Chromium, Firefox,
+# and WebKit browser & Web Worker checks and 100% mutation testing: a schedule runs in a window and in Node on all three.
+# A newer push to the same branch or pull request cancels the run before it.
 on:
   push:
     branches: [master]
@@ -28,16 +29,57 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      # The oldest TypeScript the package and its specs are held to
+      - run: npm run typecheck:floor
       - run: npm run build
       - run: npm test
       - run: npm run workflows:check
-      # The package as a consumer gets it: packed, installed elsewhere, and the README's example run from it.
+      # Build determinism (byte-for-byte), emitted size ceilings, and steady-state exploration.
+      - run: npm run package:check
+      # The package as a consumer gets it: packed, installed elsewhere, typechecked on TS 5.7, and the README example run.
       - run: npm run package:smoke
+      # The packed package as published code: its manifest and files (publint), and each entry's types (attw).
+      - run: npm run package:lint
+
+  # The schedule's specs in real browser engines and dedicated Web Workers: Chromium, Firefox, and WebKit via vitest's
+  # browser mode and Playwright. Runs on macos-15 so all three engines install cleanly without Ubuntu's WebKit apt stack.
+  browser:
+    name: browser (chromium, firefox, webkit)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - id: playwright
+        run: echo "version=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: browsers
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: playwright-all-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}
+      - if: steps.browsers.outputs.cache-hit != 'true'
+        run: npx playwright install chromium firefox webkit
+      - run: npm run test:browser
+
+  # Every mutant of the source, run against the specs: one that survives fails.
+  mutants:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run mutants
 
   # The one check a release waits on: every job above passed.
   ci-pass:
     if: always()
-    needs: [suite]
+    needs: [suite, browser, mutants]
     runs-on: ubuntu-24.04
     steps:
-      - run: test "${{ needs.suite.result }}" = "success"
+      - run: test "${{ needs.suite.result }}" = "success" -a "${{ needs.browser.result }}" = "success" -a "${{ needs.mutants.result }}" = "success"
