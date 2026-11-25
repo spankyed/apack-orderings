@@ -352,11 +352,14 @@ describe('Optimal DPOR and resource tracking', () => {
       const b = schedule.resource('b')
       const done = schedule.outside()
       let val = ''
-      setTimeout(() => {
-        schedule.later({ label: 'from-outside' }, () => { schedule.write(a); val += 'o' }, { tracked: true })
-        done()
-      }, 5)
-      schedule.later({ label: 'local' }, () => { schedule.write(b); val += 'l' }, { tracked: true })
+      schedule.later({ label: 'local' }, () => {
+        schedule.write(b)
+        val += 'l'
+        setTimeout(() => {
+          schedule.later({ label: 'from-outside' }, () => { schedule.write(a); val += 'o' }, { tracked: true })
+          done()
+        }, 5)
+      }, { tracked: true })
       return () => { seen.add(val) }
     })
     expect(explored).toEqual({ orderings: 1, complete: true })

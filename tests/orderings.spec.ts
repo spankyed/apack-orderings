@@ -254,17 +254,19 @@ describe('lanes, promises, outside(), and runaway protection', () => {
       const lane = { label: 'socket' }
       const done1 = schedule.outside()
       const done2 = schedule.outside()
-      setTimeout(() => {
-        schedule.later(lane, () => { ran.push('msg1') })
-        done1()
-        // Calling release twice must not underflow `away` or skip waiting for done2.
-        done1()
+      schedule.does('local', ['step', () => {
+        ran.push('local')
         setTimeout(() => {
-          schedule.later(lane, () => { ran.push('msg2') })
-          done2()
+          schedule.later(lane, () => { ran.push('msg1') })
+          done1()
+          // Calling release twice must not underflow `away` or skip waiting for done2.
+          done1()
+          setTimeout(() => {
+            schedule.later(lane, () => { ran.push('msg2') })
+            done2()
+          }, 5)
         }, 5)
-      }, 5)
-      schedule.does('local', ['step', () => { ran.push('local') }])
+      }])
       return () => {
         seen.push(ran.join(','))
         expect(ran).toContain('local')
