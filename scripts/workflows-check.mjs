@@ -51,4 +51,5 @@ if (broken.length > 0) {
   console.error(`Nothing here may publish to npm or hold a token for it (scripts/workflows-check.mjs):\n${broken.join('\n')}`)
   process.exit(1)
 }
-console.log(`${workflowFiles.length} workflows, ${ghScriptFiles.length} workflow scripts, and ${Object.keys(scripts).length} package scripts: none publishes to npm or holds a token for it`)
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
+console.log(`${plural(workflowFiles.length, 'workflow')}, ${plural(ghScriptFiles.length, 'workflow script')}, and ${plural(Object.keys(scripts).length, 'package script')}: none publishes to npm or holds a token for it`)

@@ -56,7 +56,7 @@ If real measurements trigger this work, do not patch `'clock'` again. Replace th
 
 Any future PR implementing timer-level DPOR must pass all of the following:
 
-- **Differential fuzzing:** ≥50,000 randomized 2-level nested programs across `mixed`, `all`, `timers`, and a dedicated nested-cancel/preemption stress profile with zero state mismatches, zero false replay throws, and `dpor.orderings <= full.orderings`.
+- **Differential fuzzing:** ≥50,000 randomized 3-level nested programs across `mixed`, `all`, `timers`, `branching`, and a dedicated conditional timer-cancel/preemption stress profile (with timer creation, cancellation, and aborts inside data-dependent `if` branches) with zero state mismatches, zero false replay throws, and `dpor.orderings <= full.orderings`.
 - **Small-scope exhaustive enumeration:** Enumerate every small program (all combinations up to bounded size) that sets, preempts, reads, and cancels timers and assert exact reachable-state equality against `explore(..., { reduce: false })`.
 - **Consumer verification:** Measure real ordering counts and wall time on `apack-link` and `apack-state` (confirming meaningful reduction and no wakeup blowup on cancel-heavy traces) with `auditIndependence()` passing.
 - **Repository gates:** 100.00% Stryker mutation score (`npm run mutants`), Node + Chromium/Firefox/WebKit + Web Worker parity, TS 5.7 floor (`typecheck:floor` + `package:smoke`), and `package:check` size ceilings.
