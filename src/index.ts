@@ -32,7 +32,7 @@ export interface Lane { readonly label: string }
 /** An opaque resource token created by `schedule.resource()` for dynamic `read()`/`write()` conflict tracking. */
 export interface Resource {
   readonly label?: string
-  readonly [RESOURCE_BRAND]?: true
+  readonly [RESOURCE_BRAND]: true
 }
 declare const RESOURCE_BRAND: unique symbol
 
@@ -65,14 +65,14 @@ export interface Clock {
    * Negative finite waits are treated as `0`. Throws `RangeError` for a non-finite `ms` or overflowing deadline.
    * Timer scheduling, cancellation, and firing are currently globally conflicting under reduction for soundness.
    */
-  after(ms: number, run: () => void, options?: TaskOptions): () => void
+  after(ms: number, run: () => void): () => void
   /**
    * Resolves `ms` from now, when the schedule gets to it. Rejects with `RangeError` for a non-finite `ms` or
    * overflowing deadline, or with `options.signal.reason` if aborted. Timer scheduling, cancellation, and firing are
    * currently globally conflicting under reduction for soundness; if a tracked task can abort the `AbortController`
    * before `sleep()` is called, guard that controller with a `Resource`.
    */
-  sleep(ms: number, options?: { readonly signal?: AbortSignal; readonly tracked?: boolean }): Promise<void>
+  sleep(ms: number, options?: { readonly signal?: AbortSignal }): Promise<void>
 }
 
 export interface Schedule {
@@ -166,6 +166,7 @@ interface Run {
   taken: string[]
   steps: TraceStep[]
   anyTracked: boolean
+  inCheck: boolean
   error?: unknown
 }
 
@@ -231,6 +232,7 @@ type StepChooser = (stepDepth: number, choiceDepth: number, ready: readonly Read
 
 async function once(scenario: Scenario, choose: StepChooser, chooseSingle = false): Promise<Run> {
   const lanes = new Map<string, Task[]>()
+  const privateLanes = new Set<string>()
   const laneIds = new Map<object, string>()
   const laneSeqs = new Map<string, number>()
   const resourceIds = new Map<Resource, string>()
@@ -271,12 +273,13 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
     return id
   }
 
-  let completedSteps = 0
-  const pushedByNow = (): number => (activeStep ? activeStep.index : completedSteps - 1)
+  const pushedByNow = (): number => (activeStep ? activeStep.index : -1)
 
   const into = (lane: object, what: string, tracked: boolean, run: () => void, shared = false): void => {
     const id = idFor(lane)
     if (shared) recordWriteId(id.includes('.') ? `push:dyn:${what}` : `push:${id}`)
+    // Stryker disable next-line all: tracking private lanes only enables O(1) cleanup once drained; skipping it is behaviorally identical.
+    else privateLanes.add(id)
     ;(lanes.get(id) ?? lanes.set(id, []).get(id)!).push({ what, tracked, pushedBy: pushedByNow(), run })
     wake()
   }
@@ -355,7 +358,7 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
       const id = activeStep
         ? `res:${activeStep.laneId}.${activeStep.laneSeq}:${activeStep.nextResource()}`
         : `res:0:${nextSetupResource()}`
-      const token: Resource = Object.freeze(label === undefined ? {} : { label })
+      const token = Object.freeze(label === undefined ? {} : { label }) as Resource
       resourceIds.set(token, id)
       return token
     },
@@ -383,7 +386,7 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
     },
   })
 
-  const made: Run = { choices: [], counts: [], taken: [], steps: [], anyTracked: false }
+  const made: Run = { choices: [], counts: [], taken: [], steps: [], anyTracked: false, inCheck: false }
   if (++activeRuns === 1) { ensureTurn(); hold!.ref?.() }
   try {
     const check = scenario(schedule)
@@ -410,6 +413,8 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
       }
       const picked = ready[chosen]!
       const task = picked.queue.shift()!
+      // Stryker disable next-line all: pruning drained private lanes only prevents O(N^2) ready scans; keeping empty entries is behaviorally identical.
+      if (!picked.queue.length && privateLanes.delete(picked.laneId)) lanes.delete(picked.laneId)
       const laneSeq = laneSeqs.get(picked.laneId) ?? 0
       // Stryker disable next-line ArithmeticOperator: counting up vs down yields an isomorphic bijection of per-lane sequence numbers.
       laneSeqs.set(picked.laneId, laneSeq + 1)
@@ -440,9 +445,9 @@ async function once(scenario: Scenario, choose: StepChooser, chooseSingle = fals
           access: finished.access,
           readyLaneIds,
         })
-        completedSteps = made.steps.length
       }
     }
+    made.inCheck = true
     await check()
   } catch (error) { made.error = error } finally {
     activeStep = undefined
@@ -473,7 +478,23 @@ async function exploreUnreduced(scenario: Scenario, limit: number, first: Run): 
     if (last < 0) return { orderings, complete: true }
     if (orderings >= limit) return { orderings, complete: false }
     const prefix = [...made.choices.slice(0, last), made.choices[last]! + 1]
-    made = await once(scenario, (_, depth) => prefix[depth] ?? 0)
+    let replayError: Error | undefined
+    made = await once(scenario, (_stepDepth, depth, ready) => {
+      if (depth >= prefix.length) return 0
+      const want = prefix[depth]!
+      if (want >= ready.length) {
+        replayError = new Error(`Nondeterministic scenario: choice ${want} at depth ${depth} is out of range for ${ready.length} ready lanes`)
+        throw replayError
+      }
+      return want
+    })
+    if (replayError) throw replayError
+    if (made.choices.length < prefix.length) {
+      throw new Error(
+        `Nondeterministic scenario: expected at least ${prefix.length} choices during prefix replay, got ${made.choices.length}`,
+        'error' in made ? { cause: made.error } : undefined,
+      )
+    }
   }
 }
 
@@ -539,7 +560,7 @@ async function exploreOptimal(scenario: Scenario, limit: number, first: Run): Pr
     const pickLane = (ready: readonly ReadyLane[], want: string, stepDepth: number): number => {
       const index = ready.findIndex((entry) => entry.laneId === want)
       if (index < 0) {
-        replayError = new Error(`Unsound tracked task: expected lane "${want}" to be enabled at depth ${stepDepth}`)
+        replayError = new Error(`Unsound tracked task or nondeterministic scenario: expected lane "${want}" to be enabled at depth ${stepDepth}`)
         throw replayError
       }
       return index
@@ -571,19 +592,22 @@ async function exploreOptimal(scenario: Scenario, limit: number, first: Run): Pr
     }, true)
 
     if (replayError) throw replayError
-    if (made.error === SLEEP_BLOCKED) {
-      wasReduced = true
-      return made.steps[prefixLanes.length - 1]!.access
-    }
-    orderings++
-    if ('error' in made) {
-      failure = { choices: made.choices, taken: made.taken, error: made.error }
-      return undefined
+    if (made.error !== SLEEP_BLOCKED) {
+      orderings++
+      if ('error' in made) {
+        failure = { choices: made.choices, taken: made.taken, error: made.error }
+        return undefined
+      }
     }
 
     const steps = made.steps
     const baseDepth = prefixLanes.length
+    if (steps.length < baseDepth) {
+      throw new Error(`Nondeterministic scenario: expected at least ${baseDepth} steps during prefix replay, got ${steps.length}`)
+    }
     const observedParent = steps[baseDepth - 1]!.access
+    const parentChild = stack[baseDepth - 1]!.wut.children[0]!
+    stack[baseDepth - 1]!.wut.children[0] = { laneId: parentChild.laneId, access: observedParent, node: parentChild.node }
 
     // Push stack frames for every step from `baseDepth` onwards (including single-ready steps so depth indices align).
     // Replacing `wut.children[0].node` with a fresh empty node is safe: deeper frames already hold the original child
@@ -687,12 +711,16 @@ const sameSet = (a: ReadonlySet<string>, b: ReadonlySet<string>): boolean =>
   a.size === b.size && [...a].every((item) => b.has(item))
 
 const sameAccess = (a: StepAccess, b: StepAccess | undefined): boolean =>
-  b !== undefined && sameSet(a.reads, b.reads) && sameSet(a.writes, b.writes)
+  b !== undefined && a.global === b.global && sameSet(a.reads, b.reads) && sameSet(a.writes, b.writes)
+
+const sameError = (a: unknown, b: unknown): boolean =>
+  a instanceof Error && b instanceof Error ? a.name === b.name && a.message === b.message : Object.is(a, b)
 
 /**
  * Audits that tasks marked `{ tracked: true }` truly commute whenever their recorded `read()`/`write()` accesses are
  * disjoint. Samples traces, swaps adjacent supposedly-independent steps, and checks that enabling, downstream ready
- * lane sets, recorded resource accesses, and pass/fail outcomes remain identical.
+ * lane sets, step labels, recorded resource accesses, and pass/fail error outcomes remain identical. Silent state
+ * divergence that does not affect any of those (or `check()` assertions) cannot be observed.
  */
 export async function auditIndependence(scenario: Scenario, options: AuditOptions = {}): Promise<AuditResult> {
   const seed = options.seed ?? 1
@@ -732,16 +760,30 @@ export async function auditIndependence(scenario: Scenario, options: AuditOption
         violation: { choices: orig.choices, prefix: prefixChoices, first: a.what, second: b.what, reason },
       })
       if (swapProblem) return fail(swapProblem)
-      if (('error' in orig) !== ('error' in swapped)) {
+      if (('error' in orig) !== ('error' in swapped) || ('error' in orig && !sameError(orig.error, swapped.error))) {
         return fail(`scenario outcome differed after swapping "${a.what}" and "${b.what}"`)
       }
-      for (let k = i + 2; k < steps.length; k++) {
-        if (!sameLaneSet(steps[k]!.readyLaneIds, swapped.steps[k]?.readyLaneIds)) {
-          return fail(`ready lanes diverged after swapping "${a.what}" and "${b.what}"`)
+      // If `b` itself threw at step `i + 1` in `orig`, swapping runs `b` at step `i` and aborts before `a` can run.
+      if (!orig.inCheck && steps.length === i + 2) {
+        if (swapped.steps.length !== i + 1 || !sameAccess(b.access, swapped.steps[i]!.access)) {
+          return fail(`resource accesses diverged after swapping "${a.what}" and "${b.what}"`)
         }
-      }
-      if (!sameAccess(a.access, swapped.steps[i + 1]?.access) || !sameAccess(b.access, swapped.steps[i]!.access)) {
-        return fail(`resource accesses diverged after swapping "${a.what}" and "${b.what}"`)
+      } else {
+        for (let k = i + 2; k < steps.length; k++) {
+          if (!sameLaneSet(steps[k]!.readyLaneIds, swapped.steps[k]?.readyLaneIds)) {
+            return fail(`ready lanes diverged after swapping "${a.what}" and "${b.what}"`)
+          }
+        }
+        if (!sameAccess(a.access, swapped.steps[i + 1]?.access) || !sameAccess(b.access, swapped.steps[i]!.access)) {
+          return fail(`resource accesses diverged after swapping "${a.what}" and "${b.what}"`)
+        }
+        for (let k = i + 2; k < steps.length; k++) {
+          const origStep = steps[k]!
+          const swapStep = swapped.steps[k]!
+          if (origStep.what !== swapStep.what || !sameAccess(origStep.access, swapStep.access)) {
+            return fail(`resource accesses diverged after swapping "${a.what}" and "${b.what}"`)
+          }
+        }
       }
       if (checked >= swaps) return { runs: run, checked }
     }

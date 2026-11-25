@@ -53,7 +53,7 @@ A scenario is a function of a `Schedule` that builds what it checks and returns 
 | `outside()` | Says something outside the schedule is under way, such as a message on a real socket. The run does not come to rest until what it returns is called; if never called, the run waits indefinitely |
 | `resource(label?)` | Allocates a run-scoped opaque `Resource` token for dynamic `read()`/`write()` conflict tracking under wakeup-tree DPOR |
 | `read(resource)` / `write(resource)` | Records that the current task (or its settled microtasks) read or wrote `resource`. Concurrent reads commute; read/write and write/write conflict |
-| `clock` | The scenario's clock: `now()`, `monotonic()`, `after(ms, run, { tracked? })` and `sleep(ms, { signal?, tracked? })`. It moves only when the schedule runs one of its timers, in the order they are due, so no test waits on real time. Timer scheduling, cancellation, and firing are currently globally conflicting under reduction for soundness (guard a shared `AbortController` with a `Resource` if a tracked task may abort it before `sleep()` is called) |
+| `clock` | The scenario's clock: `now()`, `monotonic()`, `after(ms, run)` and `sleep(ms, { signal? })`. It moves only when the schedule runs one of its timers, in the order they are due, so no test waits on real time. Timer scheduling, cancellation, and firing are currently globally conflicting under reduction for soundness (guard a shared `AbortController` with a `Resource` if a tracked task may abort it before `sleep()` is called) |
 
 What is in one lane keeps its order. Between lanes the schedule chooses, and that is all it may choose.
 
@@ -65,7 +65,7 @@ What is in one lane keeps its order. Between lanes the schedule chooses, and tha
 | `explore(scenario, { limit?, reduce? })` | The same without throwing: `{ orderings, complete, reduced?, failure? }` |
 | `sample(scenario, { seed, runs })` | Orders drawn at random from a 32-bit unsigned integer `seed` for `runs` (positive safe integer), the same ones for the same seed, for a scenario with too many to run them all |
 | `replay(scenario, choices)` | One order: the choices a failure came back with. Throws `RangeError` if any choice is negative, non-integer, or out of range, or if the recording is stale (ran out of choices or left unused trailing choices) |
-| `auditIndependence(scenario, { seed?, runs?, swaps? })` | Samples traces and swaps adjacent supposedly-independent `{ tracked: true }` steps, catching hidden shared state or disabling bugs loudly |
+| `auditIndependence(scenario, { seed?, runs?, swaps? })` | Samples traces and swaps adjacent supposedly-independent `{ tracked: true }` steps, catching hidden shared state or disabling bugs loudly (checks pass/fail error identity, ready lanes, step labels, and recorded accesses; silent state divergence that does not affect those or `check()` assertions cannot be observed) |
 
 ## What holds
 
@@ -81,14 +81,17 @@ What is in one lane keeps its order. Between lanes the schedule chooses, and tha
 
 ## How it is checked
 
-- **Cross-runtime specs:** unit specs ([tests/orderings.spec.ts](tests/orderings.spec.ts)), Node child-process exit
+- **Cross-runtime specs:** unit specs ([tests/orderings.spec.ts](tests/orderings.spec.ts), [tests/dpor.spec.ts](tests/dpor.spec.ts)), Node child-process exit
   specs ([tests/node-exit.spec.ts](tests/node-exit.spec.ts)), and dedicated Web Worker specs
   ([tests/worker.spec.ts](tests/worker.spec.ts)) run in Node on Linux, macOS, and Windows, and in Chromium, Firefox,
   and WebKit.
+- **Differential fuzzing:** `npm run fuzz` compares wakeup-tree DPOR against unreduced exploration across randomized
+  nested, timer, and data-dependent branching programs (and nightly CI rotates the seed across 2,100 programs).
 - **Every mutant is caught:** `npm run mutants` mutates `src/` and fails CI if a single mutant survives.
 - **Packaging & floor types:** `package:check` verifies byte-for-byte build determinism and size ceilings;
   `package:lint` runs `publint` and `attw`; `package:smoke` typechecks the packed tarball against TypeScript `>= 5.7`
-  for both browser (`ES2023+DOM`, `types: []`) and Node (`ES2023`) consumers and runs the README example.
+  for browser (`ES2023+DOM`, `types: []`), Web Worker (`ES2023+WebWorker`, `types: []`), and Node (`ES2023`) consumers
+  and runs the README example.
 
 ## Requirements & installing
 

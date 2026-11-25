@@ -11,10 +11,10 @@ what to know before changing it.
   strict replay (`replay`), and commutativity auditing (`auditIndependence`). `src/dpor.ts` implements the pure
   Optimal DPOR wakeup-tree and race-detection logic.
 - `tests/orderings.spec.ts` holds core scheduler, clock, option/choice validation, listener cleanup, and lazy
-  `MessageChannel` specs. `tests/dpor.spec.ts` covers Optimal DPOR, automatic clock tracking, differential fuzzing
-  against unreduced exploration, and `auditIndependence()`. `tests/node-exit.spec.ts` verifies that idle Node child
-  processes exit cleanly, and `tests/worker.spec.ts` with `tests/support/orderings-worker.ts` verifies dedicated Web
-  Workers across Chromium, Firefox, and WebKit.
+  `MessageChannel` specs. `tests/dpor.spec.ts` covers Optimal DPOR, globally conflicting clock tracking, differential
+  fuzzing against unreduced exploration, and `auditIndependence()`. `tests/node-exit.spec.ts` verifies that idle Node
+  child processes exit cleanly, and `tests/worker.spec.ts` with `tests/support/orderings-worker.ts` verifies dedicated
+  Web Workers across Chromium, Firefox, and WebKit.
 - `scripts/` is what CI and a release run: build determinism and size/cost checks (`package-check.mjs`), `publint` +
   `attw` (`package-lint.mjs`), consumer runtime + TS 5.7 ES2023 typecheck smoke (`package-smoke.mjs`), and the check
   that no workflow publishes to npm (`workflows-check.mjs`).

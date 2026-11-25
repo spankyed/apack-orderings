@@ -4,7 +4,7 @@
 //
 //   npm run fuzz
 //   FUZZ_PROGRAMS=1500 FUZZ_SEED=7 npm run fuzz
-import { explore } from '../src/index.ts'
+import { explore, replay } from '../src/index.ts'
 import { runDifferentialFuzz } from '../tests/support/fuzz-programs.ts'
 
 const programs = Number.parseInt(process.env.FUZZ_PROGRAMS ?? '600', 10)
@@ -12,7 +12,7 @@ const seed = Number.parseInt(process.env.FUZZ_SEED ?? '42', 10)
 if (!Number.isSafeInteger(programs) || programs < 1) throw new RangeError(`Invalid FUZZ_PROGRAMS: ${String(programs)}`)
 if (!Number.isInteger(seed) || seed < 0 || seed > 0xffff_ffff) throw new RangeError(`Invalid FUZZ_SEED: ${String(seed)}`)
 
-const profiles = ['mixed', 'all', 'timers']
+const profiles = ['mixed', 'all', 'timers', 'branching']
 const base = Math.floor(programs / profiles.length)
 const extra = programs % profiles.length
 
@@ -25,7 +25,7 @@ for (let i = 0; i < profiles.length; i++) {
   if (count === 0) continue
   const profile = profiles[i]
   const profileSeed = (seed + i * 100_003) >>> 0
-  const summary = await runDifferentialFuzz(explore, { seed: profileSeed, programs: count, profile })
+  const summary = await runDifferentialFuzz(explore, { seed: profileSeed, programs: count, profile, replayFn: replay })
   totalPrograms += summary.programs
   totalUnreduced += summary.totalUnreduced
   totalReduced += summary.totalReduced
