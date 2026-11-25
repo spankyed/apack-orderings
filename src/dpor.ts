@@ -1,9 +1,9 @@
 // Optimal Dynamic Partial-Order Reduction (Abdulla et al., JACM 2017, Algorithm 2: Wakeup Trees).
 //
 // Operates on trace steps produced by `once()` without any state checkpointing. Each step records its canonical
-// lane identity, which earlier step created it (`pushedBy`), whether it cancelled a previously-pending timer, and
-// the opaque resource tokens it read or wrote (`StepAccess`). Untracked tasks set `global = true` and conflict with
-// everything, keeping reduction sound by default.
+// lane identity, which earlier step created it (`pushedBy`), whether it cancelled or preempted a previously-pending
+// timer, and the opaque resource tokens it read or wrote (`StepAccess`). Untracked tasks set `global = true` and
+// conflict with everything, keeping reduction sound by default.
 
 /** Resource accesses observed while a step (and its settled microtasks) ran, keyed by canonical run-invariant IDs. */
 export interface StepAccess {
@@ -59,19 +59,41 @@ export const makeWutNode = (): WutNode => ({ children: [] })
  * Checks whether a single step `head` occurs in `rem` and commutes past every step before it. Returns the remaining
  * sequence with `head` removed if subsumed, or `undefined` otherwise.
  */
-const stepSubsumes = (head: StepRef, rem: readonly StepRef[]): readonly StepRef[] | undefined => {
+const stepSubsumes = (
+  head: StepRef,
+  rem: readonly StepRef[],
+): { readonly next: readonly StepRef[]; readonly target: StepAccess } | undefined => {
   const index = rem.findIndex((other) => other.laneId === head.laneId)
   if (index < 0) return undefined
-  for (let k = 0; k < index; k++) if (conflicts(head.access, rem[k]!.access)) return undefined
-  return [...rem.slice(0, index), ...rem.slice(index + 1)]
+  const target = rem[index]!.access
+  for (let k = 0; k < index; k++) {
+    if (conflicts(head.access, rem[k]!.access) || conflicts(target, rem[k]!.access)) return undefined
+  }
+  return { next: [...rem.slice(0, index), ...rem.slice(index + 1)], target }
 }
 
-/** Whether any branch in `node` weakly covers `rem` (either a leaf is a weak prefix of `rem`, or `rem` is fully matched). */
-const hasCoveringLeaf = (node: WutNode, rem: readonly StepRef[]): boolean => {
-  if (!node.children.length || !rem.length) return true
-  for (const child of node.children) {
-    const next = stepSubsumes(child, rem)
-    if (next !== undefined && hasCoveringLeaf(child.node, next)) return true
+/**
+ * Whether any branch in `node` weakly covers `rem`: either `rem` is fully matched, or a leaf is a weak prefix of
+ * `rem` that already wakes every sleeper / left-sibling in `mustWake` that `rem` itself would wake.
+ */
+const hasCoveringLeaf = (
+  node: WutNode,
+  rem: readonly StepRef[],
+  mustWake: readonly StepAccess[],
+): boolean => {
+  if (!rem.length) return true
+  if (!node.children.length) return mustWake.every((acc) => !rem.some((step) => conflicts(acc, step.access)))
+  for (let i = 0; i < node.children.length; i++) {
+    const child = node.children[i]!
+    const hit = stepSubsumes(child, rem)
+    if (!hit) continue
+    const wakes = (acc: StepAccess): boolean => conflicts(acc, child.access) && conflicts(acc, hit.target)
+    const nextMustWake = mustWake.filter((acc) => !wakes(acc))
+    for (let left = 0; left < i; left++) {
+      const leftAcc = node.children[left]!.access
+      if (!wakes(leftAcc)) nextMustWake.push(leftAcc)
+    }
+    if (hasCoveringLeaf(child.node, hit.next, nextMustWake)) return true
   }
   return false
 }
@@ -82,18 +104,18 @@ const hasCoveringLeaf = (node: WutNode, rem: readonly StepRef[]): boolean => {
  */
 export const insertWut = (root: WutNode, sleep: ReadonlyMap<string, StepAccess>, seq: readonly StepRef[]): void => {
   for (const [laneId, access] of sleep) {
-    if (stepSubsumes({ laneId, access }, seq) !== undefined) return
+    if (stepSubsumes({ laneId, access }, seq)) return
   }
-  if (hasCoveringLeaf(root, seq)) return
+  if (hasCoveringLeaf(root, seq, [...sleep.values()])) return
   let node = root
   let rem: readonly StepRef[] = seq
   for (;;) {
     let matched = false
     for (const child of node.children) {
-      const next = stepSubsumes(child, rem)
-      if (next !== undefined) {
+      const hit = stepSubsumes(child, rem)
+      if (hit) {
         node = child.node
-        rem = next
+        rem = hit.next
         matched = true
         break
       }

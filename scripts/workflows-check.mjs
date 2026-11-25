@@ -11,6 +11,7 @@ import * as path from 'node:path'
 
 const ROOT = path.resolve(process.argv[2] ?? path.join(import.meta.dirname, '..'))
 const WORKFLOWS = path.join(ROOT, '.github', 'workflows')
+const GH_SCRIPTS = path.join(ROOT, '.github', 'scripts')
 
 /** What is refused, with why, each tested against one line */
 const RULES = [
@@ -20,8 +21,12 @@ const RULES = [
   [/\bsecrets\.(?!GITHUB_TOKEN\b)\w+|\bsecrets\s*\[|\btoJSON\(\s*secrets\s*\)|\bsecrets:\s*inherit\b/, 'a secret other than the GITHUB_TOKEN'],
 ]
 
-const files = fs.readdirSync(WORKFLOWS).filter((name) => /\.ya?ml$/.test(name)).map((name) => path.join(WORKFLOWS, name))
-if (files.length === 0) throw new Error(`No workflows in ${WORKFLOWS}`)
+const workflowFiles = fs.readdirSync(WORKFLOWS).filter((name) => /\.ya?ml$/.test(name)).map((name) => path.join(WORKFLOWS, name))
+if (workflowFiles.length === 0) throw new Error(`No workflows in ${WORKFLOWS}`)
+const ghScriptFiles = fs.existsSync(GH_SCRIPTS)
+  ? fs.readdirSync(GH_SCRIPTS).map((name) => path.join(GH_SCRIPTS, name)).filter((file) => fs.statSync(file).isFile())
+  : []
+const files = [...workflowFiles, ...ghScriptFiles]
 const scripts = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).scripts ?? {}
 
 const broken = []
@@ -46,4 +51,4 @@ if (broken.length > 0) {
   console.error(`Nothing here may publish to npm or hold a token for it (scripts/workflows-check.mjs):\n${broken.join('\n')}`)
   process.exit(1)
 }
-console.log(`${files.length} workflows and ${Object.keys(scripts).length} scripts: none publishes to npm or holds a token for it`)
+console.log(`${workflowFiles.length} workflows, ${ghScriptFiles.length} workflow scripts, and ${Object.keys(scripts).length} package scripts: none publishes to npm or holds a token for it`)

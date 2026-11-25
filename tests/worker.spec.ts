@@ -25,6 +25,9 @@ describe('in a dedicated Web Worker', () => {
         hasWindow: false,
         orderings: 12,
         uniqueSeen: 12,
+        dporOrderings: 1,
+        dporReduced: true,
+        auditViolation: false,
         sampledOrderings: 5,
         replayedTaken: ['y: 1', 'x: 1'],
       })

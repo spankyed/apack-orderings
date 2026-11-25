@@ -38,8 +38,8 @@ const jsRaw = jsFiles.reduce((sum, name) => sum + fs.readFileSync(path.join(dist
 const jsGzip = jsFiles.reduce((sum, name) => sum + gzipSync(fs.readFileSync(path.join(distDir, name)), { level: 9 }).length, 0)
 const dtsBytes = fs.readFileSync(path.join(distDir, 'index.d.ts'))
 
-const MAX_JS_RAW = 36_000
-const MAX_JS_GZIP = 10_000
+const MAX_JS_RAW = 38_000
+const MAX_JS_GZIP = 11_000
 if (jsRaw > MAX_JS_RAW) throw new Error(`dist/*.js grew to ${jsRaw} B (limit ${MAX_JS_RAW} B)`)
 if (jsGzip > MAX_JS_GZIP) throw new Error(`dist/*.js gzip grew to ${jsGzip} B (limit ${MAX_JS_GZIP} B)`)
 

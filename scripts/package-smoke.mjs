@@ -1,6 +1,7 @@
 // The package as a consumer gets it: packed, installed into a project of its own, imported by its name, typechecked
-// against TS 5.7 under both browser ES2023+DOM (`types: []`) and Node ES2023 (`apack-link`/`apack-state` shape) with
-// `skipLibCheck: false`, and the README's example run there. Removes what it made either way.
+// against TS 5.7 under browser ES2023+DOM (`types: []`), WebWorker ES2023 (`types: []`), and Node ES2023
+// (`apack-link`/`apack-state` shape) with `skipLibCheck: false`, and the README's example run there. Removes what it
+// made either way.
 //
 //   node scripts/package-smoke.mjs [tarball]   (without one, packs this checkout: `prepack` builds dist/ first)
 import { execFileSync } from 'node:child_process'
@@ -64,8 +65,19 @@ const taskOpts: TaskOptions = { tracked: true }
 const scenario: Scenario = (schedule: Schedule) => {
   const clock: Clock = schedule.clock
   const compatible: ApackClockShape = clock
+  const back: Clock = compatible
+  void back
   const res: Resource = schedule.resource('state')
-  schedule.later(lane, () => { schedule.read(res); schedule.write(res); void compatible.monotonic(); void compatible.now() }, taskOpts)
+  schedule.later(lane, () => {
+    schedule.read(res)
+    schedule.write(res)
+    void compatible.monotonic()
+    void compatible.now()
+    if (false) {
+      // @ts-expect-error Lane is not assignable to branded Resource
+      schedule.read(lane)
+    }
+  }, taskOpts)
   schedule.does({ label: 'user', tracked: true }, ['click', () => { schedule.write(res) }])
   return () => {}
 }
@@ -101,7 +113,22 @@ void p5
     include: ['consumer.ts'],
   }))
   execFileSync(process.execPath, [tsc57, '--noEmit', '-p', 'tsconfig.browser.json'], { cwd: consumer, stdio: 'inherit' })
-  // 2. Node ES2023 consumer (matches `apack-link` and `apack-state`: `lib: ["ES2023"]`, `types: ["node"]`, no `ESNext.Disposable`).
+  // 2. Dedicated Web Worker ES2023+WebWorker consumer (`types: []`, no `DOM`, `skipLibCheck: false`).
+  fs.writeFileSync(path.join(consumer, 'tsconfig.worker.json'), JSON.stringify({
+    compilerOptions: {
+      target: 'ES2023',
+      module: 'NodeNext',
+      moduleResolution: 'NodeNext',
+      lib: ['ES2023', 'WebWorker'],
+      types: [],
+      noEmit: true,
+      strict: true,
+      skipLibCheck: false,
+    },
+    include: ['consumer.ts'],
+  }))
+  execFileSync(process.execPath, [tsc57, '--noEmit', '-p', 'tsconfig.worker.json'], { cwd: consumer, stdio: 'inherit' })
+  // 3. Node ES2023 consumer (matches `apack-link` and `apack-state`: `lib: ["ES2023"]`, `types: ["node"]`, no `ESNext.Disposable`).
   fs.writeFileSync(path.join(consumer, 'tsconfig.node.json'), JSON.stringify({
     compilerOptions: {
       target: 'ES2023',
@@ -125,7 +152,7 @@ void p5
   const logged = execFileSync(process.execPath, ['example.mts'], { cwd: consumer, encoding: 'utf8' })
   const said = /```text\n([\s\S]*?)```/.exec(readme)?.[1]
   if (!said || logged.trim() !== said.trim()) throw new Error(`The README example logged ${logged}, and the README says ${said}`)
-  console.log('the entry loaded, TS 5.7 ES2023 browser and Node consumers typechecked, and the README example logged what the README says it does')
+  console.log('the entry loaded, TS 5.7 ES2023 browser, Web Worker, and Node consumers typechecked, and the README example logged what the README says it does')
 } finally {
   fs.rmSync(consumer, { recursive: true, force: true })
 }

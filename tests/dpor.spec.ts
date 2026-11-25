@@ -181,7 +181,7 @@ describe('Optimal DPOR and resource tracking', () => {
     const timerAndTwoLanes = await explore((schedule) => {
       const a = schedule.resource('a')
       const b = schedule.resource('b')
-      schedule.clock.after(10, () => {}, { tracked: true })
+      schedule.clock.after(10, () => {})
       schedule.later({ label: 'a' }, () => { schedule.write(a) }, { tracked: true })
       schedule.later({ label: 'b' }, () => { schedule.write(b) }, { tracked: true })
       return () => {}
@@ -193,7 +193,7 @@ describe('Optimal DPOR and resource tracking', () => {
     const withClockRead = await explore((schedule) => {
       const a = schedule.resource('a')
       const b = schedule.resource('b')
-      schedule.clock.after(10, () => { schedule.write(a) }, { tracked: true })
+      schedule.clock.after(10, () => { schedule.write(a) })
       schedule.later({ label: 'b' }, () => { schedule.write(b); timesSeen.add(schedule.clock.now()) }, { tracked: true })
       return () => {}
     })
@@ -217,8 +217,8 @@ describe('Optimal DPOR and resource tracking', () => {
       const b = schedule.resource('b')
       let ta = -1
       let tb = -1
-      schedule.later({ label: 'a' }, () => { schedule.clock.after(10, () => { schedule.write(a); ta = schedule.clock.now() }, { tracked: true }) }, { tracked: true })
-      schedule.later({ label: 'b' }, () => { schedule.clock.after(50, () => { schedule.write(b); tb = schedule.clock.now() }, { tracked: true }) }, { tracked: true })
+      schedule.later({ label: 'a' }, () => { schedule.clock.after(10, () => { schedule.write(a); ta = schedule.clock.now() }) }, { tracked: true })
+      schedule.later({ label: 'b' }, () => { schedule.clock.after(50, () => { schedule.write(b); tb = schedule.clock.now() }) }, { tracked: true })
       return () => { diffDueTimes.add(`${ta},${tb}`) }
     })
     expect(diffDue.complete).toBe(true)
@@ -228,8 +228,8 @@ describe('Optimal DPOR and resource tracking', () => {
     const sameDue = await explore((schedule) => {
       const log: string[] = []
       const logTok = schedule.resource('log')
-      schedule.later({ label: 'a' }, () => { schedule.clock.after(10, () => { schedule.write(logTok); log.push('a') }, { tracked: true }) }, { tracked: true })
-      schedule.later({ label: 'b' }, () => { schedule.clock.after(10, () => { schedule.write(logTok); log.push('b') }, { tracked: true }) }, { tracked: true })
+      schedule.later({ label: 'a' }, () => { schedule.clock.after(10, () => { schedule.write(logTok); log.push('a') }) }, { tracked: true })
+      schedule.later({ label: 'b' }, () => { schedule.clock.after(10, () => { schedule.write(logTok); log.push('b') }) }, { tracked: true })
       return () => { tieOrders.add(log.join(',')) }
     })
     expect(sameDue.complete).toBe(true)
@@ -242,8 +242,8 @@ describe('Optimal DPOR and resource tracking', () => {
       let t1 = false
       let t2 = false
       let aborted = false
-      schedule.clock.after(10, () => { t1 = true }, { tracked: true })
-      void schedule.clock.sleep(20, { signal: ac.signal, tracked: true }).then(() => { t2 = true }, () => { aborted = true })
+      schedule.clock.after(10, () => { t1 = true })
+      void schedule.clock.sleep(20, { signal: ac.signal }).then(() => { t2 = true }, () => { aborted = true })
       schedule.later({ label: 'canceller' }, () => { ac.abort(new Error('stop')) }, { tracked: true })
       return () => { cancelOutcomes.add(`${t1},${t2},${aborted}`) }
     })
@@ -256,7 +256,7 @@ describe('Optimal DPOR and resource tracking', () => {
       const b = schedule.resource('b')
       schedule.later({ label: 'a' }, () => {
         schedule.write(a)
-        const cancel = schedule.clock.after(10, () => {}, { tracked: true })
+        const cancel = schedule.clock.after(10, () => {})
         cancel()
       }, { tracked: true })
       schedule.later({ label: 'b' }, () => { schedule.write(b) }, { tracked: true })
@@ -291,11 +291,11 @@ describe('Optimal DPOR and resource tracking', () => {
       schedule.later(laneA, () => { schedule.write(acTok); ac.abort(new Error('stop')) }, { tracked: true })
       schedule.later(laneB, () => {
         schedule.read(acTok)
-        void schedule.clock.sleep(20, { signal: ac.signal, tracked: true }).then(
+        void schedule.clock.sleep(20, { signal: ac.signal }).then(
           () => { slept = 'ok'; schedule.write(reg); value = 1 },
           () => { slept = 'aborted' },
         )
-        schedule.clock.after(10, () => {}, { tracked: true })
+        schedule.clock.after(10, () => {})
       }, { tracked: true })
       schedule.later(laneB, () => { schedule.read(reg); seenValue = value }, { tracked: true })
       return () => { states.add(`now=${seenNow} read=${seenValue} sleep=${slept}`) }
@@ -308,9 +308,9 @@ describe('Optimal DPOR and resource tracking', () => {
       let second = -1
       const laneA = { label: 'A' }
       const laneB = { label: 'B' }
-      schedule.later(laneA, () => { schedule.clock.after(0, () => { first = schedule.clock.now() }, { tracked: true }) }, { tracked: true })
+      schedule.later(laneA, () => { schedule.clock.after(0, () => { first = schedule.clock.now() }) }, { tracked: true })
       schedule.later(laneB, () => {
-        void schedule.clock.sleep(0, { tracked: true }).then(() => { schedule.clock.after(10, () => {}, { tracked: true }) })
+        void schedule.clock.sleep(0).then(() => { schedule.clock.after(10, () => {}) })
       }, { tracked: true })
       schedule.later(laneB, () => { second = schedule.clock.now() }, { tracked: true })
       return () => { states.add(`timerSaw=${first} laneBSaw=${second}`) }
@@ -328,12 +328,12 @@ describe('Optimal DPOR and resource tracking', () => {
       schedule.later(laneA, () => {
         const stop = schedule.clock.after(10, () => {
           void schedule.breaks('b', new Error('x'), { tracked: true }).catch(() => { schedule.write(reg); value = 2 })
-        }, { tracked: true })
+        })
         schedule.write(slot)
         cancel = stop
       }, { tracked: true })
       schedule.later(laneB, () => {
-        const stop = schedule.clock.after(0, () => { schedule.read(reg); seen = value }, { tracked: true })
+        const stop = schedule.clock.after(0, () => { schedule.read(reg); seen = value })
         schedule.write(slot)
         cancel = stop
       }, { tracked: true })
@@ -417,16 +417,17 @@ describe('Optimal DPOR and resource tracking', () => {
       return () => {}
     }
 
-    await expect(explore(unsound)).rejects.toThrow(/Unsound tracked task/)
+    await expect(explore(unsound)).rejects.toThrow(/Unsound tracked task or nondeterministic scenario/)
   })
 
-  it('differential fuzz: wakeup-tree DPOR matches unreduced explore() across 30 nested programs (mixed, all, timers)', async () => {
-    const mixed = await runDifferentialFuzz(explore, { seed: 42, programs: 10, maxFull: 1_000, profile: 'mixed' })
-    const all = await runDifferentialFuzz(explore, { seed: 100_045, programs: 10, maxFull: 1_000, profile: 'all' })
-    const timers = await runDifferentialFuzz(explore, { seed: 200_048, programs: 10, maxFull: 1_000, profile: 'timers' })
-    expect(mixed.programs + all.programs + timers.programs).toBe(30)
-    expect(mixed.totalReduced + all.totalReduced + timers.totalReduced).toBeLessThan(
-      mixed.totalUnreduced + all.totalUnreduced + timers.totalUnreduced,
+  it('differential fuzz: wakeup-tree DPOR matches unreduced explore() across 40 nested/branching programs', async () => {
+    const mixed = await runDifferentialFuzz(explore, { seed: 42, programs: 10, maxFull: 500, profile: 'mixed', replayFn: replay })
+    const all = await runDifferentialFuzz(explore, { seed: 100_045, programs: 10, maxFull: 500, profile: 'all', replayFn: replay })
+    const timers = await runDifferentialFuzz(explore, { seed: 200_048, programs: 10, maxFull: 500, profile: 'timers', replayFn: replay })
+    const branching = await runDifferentialFuzz(explore, { seed: 300_051, programs: 10, maxFull: 500, profile: 'branching', replayFn: replay })
+    expect(mixed.programs + all.programs + timers.programs + branching.programs).toBe(40)
+    expect(mixed.totalReduced + all.totalReduced + timers.totalReduced + branching.totalReduced).toBeLessThan(
+      mixed.totalUnreduced + all.totalUnreduced + timers.totalUnreduced + branching.totalUnreduced,
     )
   })
 
@@ -673,6 +674,105 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     expect(cNode.children).toHaveLength(0)
     expect(bNode.children.map((c) => c.laneId)).toEqual(['c', 'p'])
 
+    // stepSubsumes checks BOTH head.access (from wut/sleep) AND rem[index].access (from seq) against earlier steps in rem.
+    const rootTargetConflict = seededRoot('a', r('x'))
+    insertWut(rootTargetConflict, new Map(), [
+      { laneId: 'b', access: w('y') },
+      { laneId: 'a', access: (() => { const s = r('x'); s.writes.add('y'); return s })() },
+    ])
+    expect(rootTargetConflict.children.map((c) => c.laneId)).toEqual(['a', 'b'])
+
+    // hasCoveringLeaf: a leaf does NOT cover a longer seq if `sleep` contains a lane that `rem` wakes but the leaf does not.
+    const rootSleepWake = seededRoot('a', w('x'))
+    insertWut(rootSleepWake, new Map([['q', w('z')]]), [
+      { laneId: 'a', access: w('x') },
+      { laneId: 'b', access: w('z') },
+    ])
+    expect(rootSleepWake.children).toHaveLength(1)
+    expect(rootSleepWake.children[0]!.node.children.map((c) => c.laneId)).toEqual(['b'])
+
+    // When the leaf ALREADY wakes the sleeping lane `q`, the leaf stays a leaf and covers the longer seq.
+    const rootSleepAlreadyWoken = seededRoot('a', w('x'))
+    insertWut(rootSleepAlreadyWoken, new Map([['q', w('x')]]), [
+      { laneId: 'a', access: w('x') },
+      { laneId: 'b', access: w('x') },
+    ])
+    expect(rootSleepAlreadyWoken.children[0]!.node.children).toHaveLength(0)
+
+    // hasCoveringLeaf: a leaf to the right of a left-sibling `left` does NOT cover a longer seq that wakes `left`,
+    // unless the leaf itself already conflicts with `left`.
+    const rootLeftSibling = makeWutNode()
+    rootLeftSibling.children.push({ laneId: 'left', access: w('z'), node: makeWutNode() })
+    rootLeftSibling.children.push({ laneId: 's0', access: w('x'), node: makeWutNode() })
+    insertWut(rootLeftSibling, new Map(), [
+      { laneId: 's0', access: w('x') },
+      { laneId: 's1', access: w('z') },
+    ])
+    expect(rootLeftSibling.children[1]!.node.children.map((c) => c.laneId)).toEqual(['s1'])
+
+    const rootLeftAlreadyWoken = makeWutNode()
+    rootLeftAlreadyWoken.children.push({ laneId: 'left', access: w('x'), node: makeWutNode() })
+    rootLeftAlreadyWoken.children.push({ laneId: 's0', access: w('x'), node: makeWutNode() })
+    insertWut(rootLeftAlreadyWoken, new Map(), [
+      { laneId: 's0', access: w('x') },
+      { laneId: 's1', access: w('x') },
+    ])
+    expect(rootLeftAlreadyWoken.children[1]!.node.children).toHaveLength(0)
+
+    // hasCoveringLeaf: `!rem.length` avoids inserting a duplicate branch when a later sibling already contains `seq`.
+    const rootLaterMatch = makeWutNode()
+    const aOnly = makeWutNode()
+    aOnly.children.push({ laneId: 'd', access: w('z'), node: makeWutNode() })
+    const baNode = makeWutNode()
+    baNode.children.push({ laneId: 'c', access: w('w'), node: makeWutNode() })
+    const bFirst = makeWutNode()
+    bFirst.children.push({ laneId: 'a', access: w('x'), node: baNode })
+    rootLaterMatch.children.push({ laneId: 'a', access: w('x'), node: aOnly })
+    rootLaterMatch.children.push({ laneId: 'b', access: w('y'), node: bFirst })
+    insertWut(rootLaterMatch, new Map(), [
+      { laneId: 'a', access: w('x') },
+      { laneId: 'b', access: w('y') },
+    ])
+    expect(aOnly.children.map((c) => c.laneId)).toEqual(['d'])
+
+    // hasCoveringLeaf: a leaf still covers a longer seq when an unwoken sleeper `q` is disjoint from `rem` too.
+    const rootSleepDisjointRem = seededRoot('a', w('x'))
+    insertWut(rootSleepDisjointRem, new Map([['q', w('z')]]), [
+      { laneId: 'a', access: w('x') },
+      { laneId: 'b', access: w('y') },
+    ])
+    expect(rootSleepDisjointRem.children[0]!.node.children).toHaveLength(0)
+
+    // hasCoveringLeaf: left-sibling loop is strictly `< i`, so a read-only leaf `a(r('x'))` is not added against itself.
+    const rootReadLeaf = seededRoot('a', r('x'))
+    insertWut(rootReadLeaf, new Map(), [
+      { laneId: 'a', access: r('x') },
+      { laneId: 'b', access: w('x') },
+    ])
+    expect(rootReadLeaf.children[0]!.node.children).toHaveLength(0)
+
+    // hasCoveringLeaf: waking check requires BOTH stale `child.access` AND current `target` in `seq` to conflict with
+    // the sleeper/left-sibling (a stale larger `child.access` must not falsely claim a shrunken `target` wakes `left`).
+    const rootStaleWake = makeWutNode()
+    rootStaleWake.children.push({ laneId: 'left', access: w('r2'), node: makeWutNode() })
+    rootStaleWake.children.push({ laneId: 'sh', access: w('r2'), node: makeWutNode() })
+    insertWut(rootStaleWake, new Map(), [
+      { laneId: 'sh', access: r('r1') },
+      { laneId: 'w1', access: w('r2') },
+    ])
+    expect(rootStaleWake.children[1]!.node.children.map((c) => c.laneId)).toEqual(['w1'])
+
+    // Conversely, a stale smaller `child.access` (not conflicting with `left`) also keeps `left` in `mustWake` even
+    // when `target` conflicts with `left`.
+    const rootStaleSmallWake = makeWutNode()
+    rootStaleSmallWake.children.push({ laneId: 'left', access: w('r2'), node: makeWutNode() })
+    rootStaleSmallWake.children.push({ laneId: 'sh', access: r('r1'), node: makeWutNode() })
+    insertWut(rootStaleSmallWake, new Map(), [
+      { laneId: 'sh', access: w('r2') },
+      { laneId: 'w1', access: w('r2') },
+    ])
+    expect(rootStaleSmallWake.children[1]!.node.children.map((c) => c.laneId)).toEqual(['w1'])
+
     // findWakeups: transitive hb (0 -> 1 -> 2 -> 3 with disjoint direct links (0,2) and (1,3)) suppresses non-immediate race (0, 3).
     const pair = (k1: string, k2: string) => { const s = w(k1); s.writes.add(k2); return s }
     const steps: TraceStep[] = [
@@ -801,9 +901,9 @@ describe('Optimal DPOR core helpers and edge cases', () => {
       return () => {}
     })).toEqual({ orderings: 1, complete: true, reduced: true })
 
-    // clock.sleep(..., { tracked: true }) is accepted but remains globally conflicting for soundness.
+    // clock.sleep() and clock.after() remain globally conflicting with tracked lanes (and reject unknown options in TS).
     expect(await explore((s) => {
-      void s.clock.sleep(10, { tracked: true })
+      void s.clock.sleep(10)
       s.later({ label: 'b' }, () => {}, { tracked: true })
       return () => {}
     })).toEqual({ orderings: 2, complete: true })
@@ -882,7 +982,7 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     })
     expect(laneSeqDistinct).toEqual({ orderings: 1, complete: true, reduced: true })
 
-    // Dynamic access expansion on a wakeup branch: `observedParent` updates parentFrame.wut.children[0].access.
+    // Dynamic access expansion on a wakeup branch: `observedParent` records the actual access in `frame.sleep`.
     const dynamicObserved = new Set<string>()
     const dynamicExpand = await explore((schedule) => {
       const x = schedule.resource('x')
@@ -962,8 +1062,8 @@ describe('Optimal DPOR core helpers and edge cases', () => {
       const reads: number[] = []
       let sleepOutcome = 'none'
       const ac = new AbortController()
-      schedule.clock.after(20, () => { schedule.write(r0); v0 = 99 }, { tracked: true })
-      void schedule.clock.sleep(10, { signal: ac.signal, tracked: true }).then(
+      schedule.clock.after(20, () => { schedule.write(r0); v0 = 99 })
+      void schedule.clock.sleep(10, { signal: ac.signal }).then(
         () => { sleepOutcome = 'ok' },
         () => { sleepOutcome = 'aborted' },
       )
@@ -988,7 +1088,7 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     // 1. clock.monotonic() races with a timer that advances time.
     const monoTimes = new Set<number>()
     const mono = await explore((schedule) => {
-      schedule.clock.after(10, () => {}, { tracked: true })
+      schedule.clock.after(10, () => {})
       schedule.later({ label: 'reader' }, () => { monoTimes.add(schedule.clock.monotonic()) }, { tracked: true })
       return () => {}
     })
@@ -998,9 +1098,9 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     // 2. clock.after() reads current clock when computing due time, so it races with an advancing timer.
     const firedAt = new Set<number>()
     const afterReadsClock = await explore((schedule) => {
-      schedule.clock.after(10, () => {}, { tracked: true })
+      schedule.clock.after(10, () => {})
       schedule.later({ label: 'setter' }, () => {
-        schedule.clock.after(5, () => { firedAt.add(schedule.clock.now()) }, { tracked: true })
+        schedule.clock.after(5, () => { firedAt.add(schedule.clock.now()) })
       }, { tracked: true })
       return () => {}
     })
@@ -1011,9 +1111,9 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     const preemptDirect = new Set<number>()
     const preemptRes = await explore((schedule) => {
       schedule.later({ label: 'setter' }, () => {
-        schedule.clock.after(10, () => { preemptDirect.add(schedule.clock.now()) }, { tracked: true })
+        schedule.clock.after(10, () => { preemptDirect.add(schedule.clock.now()) })
       }, { tracked: true })
-      schedule.clock.after(50, () => {}, { tracked: true })
+      schedule.clock.after(50, () => {})
       return () => {}
     })
     expect(preemptRes).toEqual({ orderings: 2, complete: true })
@@ -1023,10 +1123,10 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     const preemptMiddle = new Set<number>()
     const preemptMidRes = await explore((schedule) => {
       schedule.later({ label: 'setter' }, () => {
-        schedule.clock.after(10, () => { preemptMiddle.add(schedule.clock.now()) }, { tracked: true })
+        schedule.clock.after(10, () => { preemptMiddle.add(schedule.clock.now()) })
       }, { tracked: true })
-      schedule.clock.after(0, () => {}, { tracked: true })
-      schedule.clock.after(50, () => {}, { tracked: true })
+      schedule.clock.after(0, () => {})
+      schedule.clock.after(50, () => {})
       return () => {}
     })
     expect(preemptMidRes.complete).toBe(true)
@@ -1038,22 +1138,22 @@ describe('Optimal DPOR core helpers and edge cases', () => {
       const b = schedule.resource('b')
       schedule.later({ label: 'a' }, () => {
         schedule.write(a)
-        schedule.clock.after(50, () => { schedule.write(a) }, { tracked: true })
-        schedule.clock.after(10, () => { schedule.write(a) }, { tracked: true })
+        schedule.clock.after(50, () => { schedule.write(a) })
+        schedule.clock.after(10, () => { schedule.write(a) })
       }, { tracked: true })
       schedule.later({ label: 'b' }, () => { schedule.write(b) }, { tracked: true })
       return () => {}
     })
     expect(selfPreempt).toEqual({ orderings: 4, complete: true })
 
-    // 2e. Scheduling a LATER timer behind a pending 0 ms timer does not preempt it (`timers.slice(at)` is empty).
+    // 2e. Scheduling a LATER timer behind a pending 0 ms timer still explores both orders cleanly.
     const noPreemptLater = await explore((schedule) => {
       const a = schedule.resource('a')
       const b = schedule.resource('b')
       schedule.later({ label: 'setter' }, () => {
-        schedule.clock.after(50, () => { schedule.write(a) }, { tracked: true })
+        schedule.clock.after(50, () => { schedule.write(a) })
       }, { tracked: true })
-      schedule.clock.after(0, () => { schedule.write(b) }, { tracked: true })
+      schedule.clock.after(0, () => { schedule.write(b) })
       return () => {}
     })
     expect(noPreemptLater).toEqual({ orderings: 2, complete: true })
@@ -1064,7 +1164,7 @@ describe('Optimal DPOR core helpers and edge cases', () => {
       let fired = false
       let cancel!: () => void
       schedule.later({ label: 'canceller' }, () => { cancel() }, { tracked: true })
-      cancel = schedule.clock.after(10, () => { fired = true }, { tracked: true })
+      cancel = schedule.clock.after(10, () => { fired = true })
       return () => { cancelFirstOutcomes.add(String(fired)) }
     })
     expect(cancelFirst).toEqual({ orderings: 2, complete: true })
@@ -1073,7 +1173,7 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     // 4. Cancelling a timer during setup removes it cleanly with no activeStep.
     const setupCancel = await explore((schedule) => {
       let fired = false
-      const cancel = schedule.clock.after(10, () => { fired = true }, { tracked: true })
+      const cancel = schedule.clock.after(10, () => { fired = true })
       cancel()
       return () => { expect(fired).toBe(false) }
     })
@@ -1099,12 +1199,12 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     }
     await explore((schedule) => {
       const { signal } = trackedSignal()
-      void schedule.clock.sleep(10, { signal, tracked: true })
+      void schedule.clock.sleep(10, { signal })
       return () => {}
     })
     await explore((schedule) => {
       const { signal, abort } = trackedSignal()
-      void schedule.clock.sleep(10, { signal, tracked: true }).catch(() => {})
+      void schedule.clock.sleep(10, { signal }).catch(() => {})
       schedule.later({ label: 'ab' }, () => { abort() }, { tracked: true })
       return () => {}
     })
@@ -1303,7 +1403,7 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     const dWriteAcc2 = await auditIndependence(writeSizeDiverge, { seed: 7, runs: 1, swaps: 10 })
     expect(dWriteAcc2.violation?.reason).toMatch(/resource accesses diverged after swapping/)
 
-    // 2d. Both orig and swapped throw, but swapped throws inside step `i` (`swapped.steps[i + 1]` is undefined).
+    // 2d. Both orig and swapped throw, with different error messages (swapped throws early inside step `i`).
     const bothThrowEarly: Scenario = (schedule) => {
       const a = schedule.resource('a')
       const b = schedule.resource('b')
@@ -1316,7 +1416,185 @@ describe('Optimal DPOR core helpers and edge cases', () => {
       return () => { throw new Error('check always fails') }
     }
     const dEarlyThrow = await auditIndependence(bothThrowEarly, { seed: 2, runs: 10, swaps: 20 })
-    expect(dEarlyThrow.violation?.reason).toMatch(/resource accesses diverged after swapping/)
+    expect(dEarlyThrow.violation?.reason).toMatch(/scenario outcome differed after swapping/)
+
+    // 2e. Both orig (in check()) and swapped (inside step `i`) throw the EXACT SAME error message -> still caught!
+    const sameMsgEarlyThrow: Scenario = (schedule) => {
+      const a = schedule.resource('a')
+      const b = schedule.resource('b')
+      let aRan = false
+      schedule.later({ label: 'a' }, () => { schedule.write(a); aRan = true }, { tracked: true })
+      schedule.later({ label: 'b' }, () => {
+        schedule.write(b)
+        if (!aRan) throw new Error('identical boom')
+      }, { tracked: true })
+      return () => { throw new Error('identical boom') }
+    }
+    const dSameMsgEarly = await auditIndependence(sameMsgEarlyThrow, { seed: 2, runs: 10, swaps: 20 })
+    expect(dSameMsgEarly.violation?.reason).toMatch(/resource accesses diverged after swapping/)
+
+    // 2f. Both orig and swapped fail in check() with different error messages, different error names, or different non-Error values.
+    const diffErrorMsg: Scenario = (schedule) => {
+      const a = schedule.resource('a')
+      const b = schedule.resource('b')
+      let order = ''
+      schedule.later({ label: 'a' }, () => { schedule.write(a); order += 'a' }, { tracked: true })
+      schedule.later({ label: 'b' }, () => { schedule.write(b); order += 'b' }, { tracked: true })
+      return () => { throw new Error(`order=${order}`) }
+    }
+    expect((await auditIndependence(diffErrorMsg, { seed: 1, runs: 5, swaps: 10 })).violation?.reason)
+      .toMatch(/scenario outcome differed after swapping/)
+
+    const diffErrorName: Scenario = (schedule) => {
+      const a = schedule.resource('a')
+      const b = schedule.resource('b')
+      let first = ''
+      schedule.later({ label: 'a' }, () => { schedule.write(a); first ||= 'a' }, { tracked: true })
+      schedule.later({ label: 'b' }, () => { schedule.write(b); first ||= 'b' }, { tracked: true })
+      return () => { throw first === 'a' ? new TypeError('same') : new RangeError('same') }
+    }
+    expect((await auditIndependence(diffErrorName, { seed: 1, runs: 5, swaps: 10 })).violation?.reason)
+      .toMatch(/scenario outcome differed after swapping/)
+
+    const diffNonError: Scenario = (schedule) => {
+      const a = schedule.resource('a')
+      const b = schedule.resource('b')
+      let first = ''
+      schedule.later({ label: 'a' }, () => { schedule.write(a); first ||= 'a' }, { tracked: true })
+      schedule.later({ label: 'b' }, () => { schedule.write(b); first ||= 'b' }, { tracked: true })
+      return () => { throw first }
+    }
+    expect((await auditIndependence(diffNonError, { seed: 1, runs: 5, swaps: 10 })).violation?.reason)
+      .toMatch(/scenario outcome differed after swapping/)
+
+    const sameNonError: Scenario = (schedule) => {
+      const a = schedule.resource('a')
+      const b = schedule.resource('b')
+      schedule.later({ label: 'a' }, () => { schedule.write(a) }, { tracked: true })
+      schedule.later({ label: 'b' }, () => { schedule.write(b) }, { tracked: true })
+      return () => { throw 'same-reason' }
+    }
+    expect((await auditIndependence(sameNonError, { seed: 1, runs: 5, swaps: 10 })).violation).toBeUndefined()
+
+    // Error instance vs error-shaped plain object must NOT be treated as the same error.
+    const errorVsPlainObj: Scenario = (schedule) => {
+      const a = schedule.resource('a')
+      const b = schedule.resource('b')
+      let first = ''
+      schedule.later({ label: 'a' }, () => { schedule.write(a); first ||= 'a' }, { tracked: true })
+      schedule.later({ label: 'b' }, () => { schedule.write(b); first ||= 'b' }, { tracked: true })
+      return () => { throw first === 'a' ? new Error('same') : { name: 'Error', message: 'same' } }
+    }
+    expect((await auditIndependence(errorVsPlainObj, { seed: 1, runs: 5, swaps: 10 })).violation?.reason)
+      .toMatch(/scenario outcome differed after swapping/)
+
+    // Outcome divergence specifically when orig PASSES and swapped FAILS (check both seeds so at least one starts passing).
+    const origPassesSwapFails: Scenario = (schedule) => {
+      const a = schedule.resource('a')
+      const b = schedule.resource('b')
+      let first = ''
+      schedule.later({ label: 'a' }, () => { schedule.write(a); first ||= 'a' }, { tracked: true })
+      schedule.later({ label: 'b' }, () => { schedule.write(b); first ||= 'b' }, { tracked: true })
+      return () => { if (first === 'a') throw new Error('a first fails') }
+    }
+    expect((await auditIndependence(origPassesSwapFails, { seed: 1, runs: 1, swaps: 10 })).violation?.reason)
+      .toMatch(/scenario outcome differed after swapping/)
+
+    // 2g. Genuine independent throwing task `b` is NOT falsely flagged as a violation.
+    const soundThrowingB: Scenario = (schedule) => {
+      const a = schedule.resource('a')
+      const b = schedule.resource('b')
+      schedule.later({ label: 'a' }, () => { schedule.write(a) }, { tracked: true })
+      schedule.later({ label: 'b' }, () => { schedule.write(b); throw new Error('b always throws') }, { tracked: true })
+      return () => {}
+    }
+    expect((await auditIndependence(soundThrowingB, { seed: 1, runs: 10, swaps: 20 })).violation).toBeUndefined()
+
+    // 2h. Throwing task `b` whose access changes when swapped before `a`, or that stops throwing before `a`, IS caught.
+    const throwAccessChanges: Scenario = (schedule) => {
+      const a = schedule.resource('a')
+      const b = schedule.resource('b')
+      const extra = schedule.resource('extra')
+      let aRan = false
+      schedule.later({ label: 'a' }, () => { schedule.write(a); aRan = true }, { tracked: true })
+      schedule.later({ label: 'b' }, () => {
+        schedule.write(b)
+        if (!aRan) schedule.write(extra)
+        throw new Error('b throws')
+      }, { tracked: true })
+      return () => {}
+    }
+    expect((await auditIndependence(throwAccessChanges, { seed: 1, runs: 10, swaps: 20 })).violation?.reason)
+      .toMatch(/resource accesses diverged after swapping/)
+
+    const throwMovesToCheck: Scenario = (schedule) => {
+      const a = schedule.resource('a')
+      const b = schedule.resource('b')
+      let aRan = false
+      schedule.later({ label: 'a' }, () => { schedule.write(a); aRan = true }, { tracked: true })
+      schedule.later({ label: 'b' }, () => {
+        schedule.write(b)
+        if (aRan) throw new Error('same boom')
+      }, { tracked: true })
+      return () => { throw new Error('same boom') }
+    }
+    expect((await auditIndependence(throwMovesToCheck, { seed: 1, runs: 10, swaps: 20 })).violation?.reason)
+      .toMatch(/resource accesses diverged after swapping/)
+
+    // 2i. Global flag divergence (`a.global !== b.global`), downstream access divergence (`k >= i + 2`), and downstream `what` divergence.
+    const globalFlagDiverge: Scenario = (schedule) => {
+      const a = schedule.resource('a')
+      const b = schedule.resource('b')
+      let aRan = false
+      schedule.later({ label: 'a' }, () => { schedule.write(a); aRan = true }, { tracked: true })
+      schedule.later({ label: 'b' }, () => {
+        schedule.write(b)
+        if (!aRan) { const cancel = schedule.clock.after(10, () => {}); cancel() }
+      }, { tracked: true })
+      return () => {}
+    }
+    expect((await auditIndependence(globalFlagDiverge, { seed: 1, runs: 10, swaps: 20 })).violation?.reason)
+      .toMatch(/resource accesses diverged after swapping/)
+
+    const downstreamAccessDiverge: Scenario = (schedule) => {
+      const a = schedule.resource('a')
+      const b = schedule.resource('b')
+      const r1 = schedule.resource('r1')
+      const r2 = schedule.resource('r2')
+      let hidden = 0
+      schedule.later({ label: 'a' }, () => { schedule.write(a); hidden = 1 }, { tracked: true })
+      schedule.later({ label: 'b' }, () => {
+        schedule.write(b)
+        hidden = 2
+        schedule.later({ label: 'c' }, () => {
+          schedule.write(a)
+          schedule.write(b)
+          schedule.read(hidden === 1 ? r1 : r2)
+        }, { tracked: true })
+      }, { tracked: true })
+      return () => {}
+    }
+    expect((await auditIndependence(downstreamAccessDiverge, { seed: 1, runs: 20, swaps: 50 })).violation?.reason)
+      .toMatch(/resource accesses diverged after swapping/)
+
+    const downstreamWhatDiverge: Scenario = (schedule) => {
+      const a = schedule.resource('a')
+      const b = schedule.resource('b')
+      let hidden = 0
+      schedule.later({ label: 'a' }, () => { schedule.write(a); hidden = 1 }, { tracked: true })
+      schedule.later({ label: 'b' }, () => {
+        schedule.write(b)
+        hidden = 2
+        schedule.later({ label: 'c' }, () => {
+          schedule.write(a)
+          schedule.write(b)
+          void schedule.work(hidden === 1 ? 'w1' : 'w2', 1, { tracked: true })
+        }, { tracked: true })
+      }, { tracked: true })
+      return () => {}
+    }
+    expect((await auditIndependence(downstreamWhatDiverge, { seed: 1, runs: 20, swaps: 50 })).violation?.reason)
+      .toMatch(/resource accesses diverged after swapping/)
 
     // 3. Ready-lane divergence where orig ends right after (i, i+1) while swapped spawns an extra lane, and vice versa.
     const origEndsSwapContinues: Scenario = (schedule) => {
@@ -1416,5 +1694,224 @@ describe('Optimal DPOR core helpers and edge cases', () => {
     await expect(auditIndependence(noop, { swaps: 0 })).rejects.toThrow('auditIndependence expects swaps to be a positive safe integer, and was given 0')
     await expect(sample(noop, { seed: -1, runs: 1 })).rejects.toThrow('sample expects seed to be a 32-bit unsigned integer, and was given -1')
     await expect(sample(noop, { seed: 1, runs: 0 })).rejects.toThrow('sample expects runs to be a positive safe integer, and was given 0')
+  })
+
+  it('explores races discovered along sleep-set-blocked prefixes and handles limit boundaries accurately', async () => {
+    // Regression: in `c -> a -> q -> r`, `b` stays in `sleep` and triggers SLEEP_BLOCKED at depth 4.
+    // DPOR must still detect the `(q, r)` race at depth 2 and explore `c -> a -> r -> b -> q` (`saw=99`).
+    const makeSsbRace = (states: Set<string>, failOn99 = false): Scenario => (schedule) => {
+      const r1 = schedule.resource('r1')
+      const r2 = schedule.resource('r2')
+      const r3 = schedule.resource('r3')
+      const rqr = schedule.resource('rqr')
+      let v1 = 0
+      let cSet = false
+      let saw = -1
+      let qr = 0
+
+      schedule.later({ label: 'a' }, () => {
+        schedule.read(r2)
+        if (!cSet) {
+          schedule.write(r1)
+          v1 = 1
+        } else {
+          schedule.later({ label: 'q' }, () => { schedule.write(rqr); qr = 1 }, { tracked: true })
+          schedule.later({ label: 'r' }, () => {
+            schedule.read(rqr)
+            if (qr === 0) { schedule.write(r1); v1 = 99 }
+          }, { tracked: true })
+        }
+      }, { tracked: true })
+      schedule.later({ label: 'b' }, () => {
+        schedule.read(r1)
+        schedule.write(r1)
+        saw = v1
+        if (v1 === 1) schedule.write(r3)
+      }, { tracked: true })
+      schedule.later({ label: 'c' }, () => {
+        schedule.write(r2)
+        schedule.write(r3)
+        cSet = true
+      }, { tracked: true })
+
+      return () => {
+        states.add(`v1=${v1},saw=${saw},cSet=${cSet},qr=${qr}`)
+        if (failOn99 && saw === 99) throw new Error('saw=99')
+      }
+    }
+
+    const fullStates = new Set<string>()
+    const dporStates = new Set<string>()
+    const full = await explore(makeSsbRace(fullStates), { reduce: false })
+    const dpor = await explore(makeSsbRace(dporStates), { reduce: true })
+    expect(full.complete).toBe(true)
+    expect(dpor.complete).toBe(true)
+    expect(dpor.reduced).toBe(true)
+    expect(dpor.orderings).toBeLessThan(full.orderings)
+    expect([...dporStates].sort()).toEqual([...fullStates].sort())
+    expect(dporStates.has('v1=99,saw=99,cSet=true,qr=1')).toBe(true)
+
+    const caught = await explore(makeSsbRace(new Set(), true), { reduce: true })
+    expect(caught.complete).toBe(false)
+    expect(String(caught.failure?.error)).toMatch(/saw=99/)
+    const replayed = await replay(makeSsbRace(new Set(), true), caught.failure!.choices)
+    expect(replayed.taken).toEqual(caught.failure!.taken)
+    expect(String(replayed.error)).toMatch(/saw=99/)
+
+    // SLEEP_BLOCKED does not increment `orderings`, and `limit` stops before exploring unverified wakeup siblings.
+    const atCount = await explore(makeSsbRace(new Set()), { reduce: true, limit: dpor.orderings })
+    expect(atCount).toEqual({ orderings: dpor.orderings, complete: false, reduced: true })
+    const afterSsb = await explore(makeSsbRace(new Set()), { reduce: true, limit: dpor.orderings + 1 })
+    expect(afterSsb).toEqual({ orderings: dpor.orderings, complete: true, reduced: true })
+
+    // Regression (branching fuzzer #0): a shorter leaf `[S0]` to the right of `L1` must not swallow `[S0, L0.1, S1]`
+    // when `S0` does not wake `L1` while `S1` does — including when `L1` expanded its access on its wakeup branch.
+    for (const l2BeforeL1 of [false, true]) {
+      const makeLeafWake = (states: Set<string>): Scenario => (schedule) => {
+        const r0 = schedule.resource('r0')
+        const r1 = schedule.resource('r1')
+        const r2 = schedule.resource('r2')
+        let v0 = 0
+        let v1 = 0
+        let v2 = 0
+        let o0 = -1
+        let o1 = -1
+        let spawned = false
+        const sh = { label: 'sh' }
+        const l0 = { label: 'L0' }
+        schedule.later(l0, () => {
+          schedule.read(r1)
+          o0 = v1
+          schedule.later(sh, () => { schedule.write(r0); v0 = 12 }, { tracked: true })
+        }, { tracked: true })
+        schedule.later(l0, () => {
+          schedule.read(r0)
+          o1 = v0
+          schedule.later(sh, () => {
+            schedule.read(r0)
+            if (v0 !== 0) { schedule.write(r2); v2 = 1 }
+          }, { tracked: true })
+        }, { tracked: true })
+        const addL1 = (): void => {
+          schedule.later({ label: 'L1' }, () => {
+            schedule.read(r1)
+            if (v1 === 1) {
+              spawned = true
+            } else {
+              schedule.read(r2)
+              if (v2 === 0 && v1 === 0) { schedule.write(r1); v1 = 2 }
+            }
+          }, { tracked: true })
+        }
+        const addL2 = (): void => {
+          schedule.later({ label: 'L2' }, () => {
+            schedule.read(r0)
+            schedule.read(r1)
+            schedule.write(r1)
+            v1++
+          }, { tracked: true })
+        }
+        if (l2BeforeL1) { addL2(); addL1() } else { addL1(); addL2() }
+        return () => { states.add(`${v0},${v1},${v2}|o0=${o0},o1=${o1},sp=${spawned}`) }
+      }
+      const fs = new Set<string>()
+      const ds = new Set<string>()
+      const fullRes = await explore(makeLeafWake(fs), { reduce: false })
+      const dporRes = await explore(makeLeafWake(ds), { reduce: true })
+      expect(fullRes.complete).toBe(true)
+      expect(dporRes.complete).toBe(true)
+      expect(dporRes.orderings).toBeLessThan(fullRes.orderings)
+      expect([...ds].sort()).toEqual([...fs].sort())
+      expect(ds.has('12,1,1|o0=0,o1=12,sp=false')).toBe(true)
+    }
+  })
+
+  it('fails loudly on nondeterministic prefix divergence in unreduced and optimal exploration', async () => {
+    // 1. Unreduced: ready lanes shrink so prefix choice is out of range (want === ready.length).
+    let run1 = 0
+    const shrinkReady: Scenario = (schedule) => {
+      run1++
+      schedule.does('a', ['1', () => {}])
+      schedule.does('b', ['1', () => {}])
+      if (run1 <= 4) schedule.does('c', ['1', () => {}])
+      return () => {}
+    }
+    await expect(explore(shrinkReady)).rejects.toThrow(
+      'Nondeterministic scenario: choice 2 at depth 0 is out of range for 2 ready lanes',
+    )
+
+    // 2. Unreduced: run terminates early without error before consuming prefix choices (no `cause`).
+    let run2 = 0
+    const earlyFinish: Scenario = (schedule) => {
+      run2++
+      schedule.does('a', ['1', () => {}])
+      if (run2 === 1) schedule.does('b', ['1', () => {}])
+      return () => {}
+    }
+    let caughtNoCause: Error | undefined
+    try {
+      await explore(earlyFinish)
+    } catch (error) {
+      caughtNoCause = error as Error
+    }
+    expect(caughtNoCause?.message).toBe('Nondeterministic scenario: expected at least 1 choices during prefix replay, got 0')
+    expect('cause' in caughtNoCause!).toBe(false)
+
+    // 3. Unreduced: run throws during setup before consuming prefix choices (attaches `cause`).
+    let run3 = 0
+    const earlyBoom = new Error('flaky setup')
+    const earlyThrow: Scenario = (schedule) => {
+      run3++
+      if (run3 === 2) throw earlyBoom
+      schedule.does('a', ['1', () => {}])
+      schedule.does('b', ['1', () => {}])
+      return () => {}
+    }
+    let caughtWithCause: Error | undefined
+    try {
+      await explore(earlyThrow)
+    } catch (error) {
+      caughtWithCause = error as Error
+    }
+    expect(caughtWithCause?.message).toBe('Nondeterministic scenario: expected at least 1 choices during prefix replay, got 0')
+    expect(caughtWithCause?.cause).toBe(earlyBoom)
+
+    // 4. Optimal DPOR: run terminates early before reaching `baseDepth` steps.
+    let run4 = 0
+    const earlyOpt: Scenario = (schedule) => {
+      run4++
+      const r = schedule.resource('r')
+      if (run4 === 1) {
+        schedule.later({ label: 'a' }, () => { schedule.write(r) }, { tracked: true })
+        schedule.later({ label: 'b' }, () => { schedule.write(r) }, { tracked: true })
+      }
+      return () => {}
+    }
+    await expect(explore(earlyOpt)).rejects.toThrow(
+      'Nondeterministic scenario: expected at least 1 steps during prefix replay, got 0',
+    )
+  })
+
+  it('enforces branded Resource tokens and clean @apackdev/clock signatures at compile time', async () => {
+    const explored = await explore((schedule) => {
+      const r = schedule.resource('ok')
+      const lane = { label: 'lane' }
+      schedule.later(lane, () => {
+        schedule.read(r)
+        schedule.write(r)
+        if (false) {
+          // @ts-expect-error plain objects and Lanes are not assignable to Resource
+          schedule.read(lane)
+          // @ts-expect-error plain objects and Lanes are not assignable to Resource
+          schedule.write({ label: 'fake' })
+          // @ts-expect-error clock.after no longer accepts a dead TaskOptions argument
+          schedule.clock.after(10, () => {}, { tracked: true })
+          // @ts-expect-error clock.sleep no longer accepts a dead tracked option
+          void schedule.clock.sleep(10, { tracked: true })
+        }
+      }, { tracked: true })
+      return () => {}
+    })
+    expect(explored).toEqual({ orderings: 1, complete: true })
   })
 })
